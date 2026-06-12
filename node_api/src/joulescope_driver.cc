@@ -17,10 +17,27 @@
 #include <assert.h>
 #include <stdint.h>
 #include <cstring>  // memset
+#include <cstdio>  // snprintf
 #include "joulescope_driver.h"
+#include "jsdrv/error_code.h"
 
 static const uint32_t _TIMEOUT_MS_INIT = 5000;
 static const uint32_t _TIMEOUT_MS = 2000;
+
+static void throw_jsdrv_error(Napi::Env env, const char * operation, int32_t status) {
+    const char * name = jsdrv_error_code_name(status);
+    const char * description = jsdrv_error_code_description(status);
+    if (!name || (name[0] == 0)) {
+        name = "UNKNOWN";
+    }
+    if (!description || (description[0] == 0)) {
+        description = "Unknown error";
+    }
+    char msg[320];
+    snprintf(msg, sizeof(msg), "%s failed: code=%d, name=%s, description=%s",
+             operation, (int) status, name, description);
+    napi_throw_error(env, NULL, msg);
+}
 
 
 Napi::Object JoulescopeDriver::Init(Napi::Env env, Napi::Object exports) {
@@ -46,7 +63,7 @@ JoulescopeDriver::JoulescopeDriver(const Napi::CallbackInfo& info)
     this->context_ = NULL;
     int32_t status = jsdrv_initialize(&this->context_, NULL, _TIMEOUT_MS_INIT);
     if (status) {
-        napi_throw_error(env, NULL, "jsdrv_initialize failed");
+        throw_jsdrv_error(env, "jsdrv_initialize", status);
         return;
     }
 }
@@ -110,7 +127,7 @@ Napi::Value JoulescopeDriver::publish(const Napi::CallbackInfo& info) {
 
     int32_t status = jsdrv_publish(this->context_, topic.c_str(), &value, timeout_ms);
     if (status) {
-        napi_throw_error(env, NULL, "jsdrv_publish failed");
+        throw_jsdrv_error(env, "jsdrv_publish", status);
     }
     return env.Undefined();
 }
@@ -335,7 +352,7 @@ Napi::Value JoulescopeDriver::query(const Napi::CallbackInfo& info) {
     v.value.str = byte_str;
     int32_t status = jsdrv_query(this->context_, topic_str.c_str(), &v, timeout_ms);
     if (status) {
-        napi_throw_error(env, NULL, "jsdrv_query failed");
+        throw_jsdrv_error(env, "jsdrv_query", status);
         return env.Undefined();
     }
     return union_to_js(env, &v);
@@ -391,7 +408,7 @@ Napi::Value JoulescopeDriver::subscribe(const Napi::CallbackInfo& info) {  // to
                                      _subscribe_fn, context, timeout_ms);
     if (status) {
         delete context;
-        napi_throw_error(env, NULL, "jsdrv_subscribe failed");
+        throw_jsdrv_error(env, "jsdrv_subscribe", status);
         return env.Undefined();
     }
     struct jsdrv_context_s * jsdrv_context = this->context_;
