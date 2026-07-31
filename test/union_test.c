@@ -23,6 +23,7 @@
 #include "jsdrv_prv/platform.h"
 #include "jsdrv/union.h"
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -212,6 +213,74 @@ static void test_value_to_str(void ** state) {
     assert_str("str.RC hello", &jsdrv_union_cstr_r("hello"), 1);
     assert_str("jsn.C  hello", &jsdrv_union_cjson("hello"), 1);
     assert_str("bin.C  size=4", &jsdrv_union_cbin((const uint8_t *) "one", 4), 1);
+    // 64-bit values must not truncate to 32-bit
+    assert_str("5000000000", &jsdrv_union_u64(5000000000LLU), 0);
+    assert_str("-5000000000", &jsdrv_union_i64(-5000000000LL), 0);
+    // floats format as scientific notation; null terminates the buffer
+    assert_str("", &jsdrv_union_null(), 0);
+    assert_str("0.00000000e0", &jsdrv_union_f32(0.0f), 0);
+    assert_str("1.00000000e0", &jsdrv_union_f64(1.0), 0);
+    assert_str("-1.50000000e0", &jsdrv_union_f64(-1.5), 0);
+    assert_str("2.50000000e-1", &jsdrv_union_f64(0.25), 0);
+    assert_str("1.00000000e6", &jsdrv_union_f64(1e6), 0);
+    assert_str("nan", &jsdrv_union_f64(NAN), 0);
+}
+
+static void test_value_to_str_terminates(void ** state) {
+    // previously F32/F64/NULL returned success without writing anything
+    (void) state;
+    char buf[32];
+    memset(buf, 'x', sizeof(buf));
+    assert_int_equal(0, jsdrv_union_value_to_str(&jsdrv_union_f32(1.0f), buf, sizeof(buf), 0));
+    assert_true(strlen(buf) < sizeof(buf));
+    memset(buf, 'x', sizeof(buf));
+    assert_int_equal(0, jsdrv_union_value_to_str(&jsdrv_union_null(), buf, sizeof(buf), 0));
+    assert_int_equal(0, buf[0]);
+}
+
+static void test_as_type_f64_negative(void ** state) {
+    // previously all f64 -> signed conversions rejected negative values
+    (void) state;
+    struct jsdrv_union_s x;
+    x = jsdrv_union_f64(-8.0);
+    assert_int_equal(0, jsdrv_union_as_type(&x, JSDRV_UNION_I8));
+    assert_int_equal(-8, x.value.i8);
+    x = jsdrv_union_f64(-1000.0);
+    assert_int_equal(0, jsdrv_union_as_type(&x, JSDRV_UNION_I16));
+    assert_int_equal(-1000, x.value.i16);
+    x = jsdrv_union_f64(-100000.0);
+    assert_int_equal(0, jsdrv_union_as_type(&x, JSDRV_UNION_I32));
+    assert_int_equal(-100000, x.value.i32);
+    x = jsdrv_union_f64(-5000000000.0);
+    assert_int_equal(0, jsdrv_union_as_type(&x, JSDRV_UNION_I64));
+    assert_int_equal(-5000000000LL, x.value.i64);
+    // out-of-range must still reject
+    x = jsdrv_union_f64(-200.0);
+    assert_int_not_equal(0, jsdrv_union_as_type(&x, JSDRV_UNION_I8));
+    x = jsdrv_union_f64(-1.0);
+    assert_int_not_equal(0, jsdrv_union_as_type(&x, JSDRV_UNION_U8));
+    // u64 range beyond u32 (previously rejected)
+    x = jsdrv_union_f64(5000000000.0);
+    assert_int_equal(0, jsdrv_union_as_type(&x, JSDRV_UNION_U64));
+    assert_int_equal(5000000000LLU, x.value.u64);
+}
+
+static void test_eq_stdmsg_frame(void ** state) {
+    // previously STDMSG/FRAME fell to default: never equal
+    (void) state;
+    uint8_t payload[4] = {1, 2, 3, 4};
+    uint8_t payload2[4] = {1, 2, 3, 5};
+    struct jsdrv_union_s v1 = jsdrv_union_bin(payload, sizeof(payload));
+    struct jsdrv_union_s v2 = jsdrv_union_bin(payload, sizeof(payload));
+    v1.type = JSDRV_UNION_STDMSG;
+    v2.type = JSDRV_UNION_STDMSG;
+    assert_true(jsdrv_union_eq(&v1, &v2));
+    v2.value.bin = payload2;
+    assert_false(jsdrv_union_eq(&v1, &v2));
+    v1.type = JSDRV_UNION_FRAME;
+    v2.type = JSDRV_UNION_FRAME;
+    v2.value.bin = payload;
+    assert_true(jsdrv_union_eq(&v1, &v2));
 }
 
 static void test_copy_scalar(void ** state) {
@@ -292,6 +361,9 @@ int main(void) {
             cmocka_unit_test(test_as_type),
             cmocka_unit_test(test_type_to_str),
             cmocka_unit_test(test_value_to_str),
+            cmocka_unit_test(test_value_to_str_terminates),
+            cmocka_unit_test(test_as_type_f64_negative),
+            cmocka_unit_test(test_eq_stdmsg_frame),
             cmocka_unit_test(test_copy_scalar),
             cmocka_unit_test(test_copy_str),
             cmocka_unit_test(test_copy_bin),

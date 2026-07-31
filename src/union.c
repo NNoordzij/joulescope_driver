@@ -37,7 +37,9 @@ bool jsdrv_union_eq(const struct jsdrv_union_s * v1, const struct jsdrv_union_s 
             }
             return 0 == memcmp(v1->value.str, v2->value.str, sz1 - 1);
         }
-        case JSDRV_UNION_BIN:
+        case JSDRV_UNION_BIN:    /* intentional fall-through */
+        case JSDRV_UNION_STDMSG: /* intentional fall-through */
+        case JSDRV_UNION_FRAME:
             if (v1->size != v2->size) {
                 return false;
             }
@@ -160,15 +162,17 @@ int32_t jsdrv_union_as_type(struct jsdrv_union_s * x, uint8_t type) {
         }
         case JSDRV_UNION_F64: {
             double v = x->value.f64;
+            // 2^64 and 2^63 are exactly representable as doubles;
+            // (double) INT64_MAX / UINT64_MAX round up, so use >= bounds.
             switch (type) {
                 case JSDRV_UNION_U8:  AS_F64((v < 0) || (v > UINT8_MAX), u8, uint8_t);
                 case JSDRV_UNION_U16: AS_F64((v < 0) || (v > UINT16_MAX), u16, uint16_t);
                 case JSDRV_UNION_U32: AS_F64((v < 0) || (v > UINT32_MAX), u32, uint32_t);
-                case JSDRV_UNION_U64: AS_F64((v < 0) || (v > UINT32_MAX), u64, uint64_t);
-                case JSDRV_UNION_I8:  AS_F64((v < 0) || (v > INT8_MAX), i8, int8_t);
-                case JSDRV_UNION_I16: AS_F64((v < 0) || (v > INT16_MAX), i16, int16_t);
-                case JSDRV_UNION_I32: AS_F64((v < 0) || (v > INT32_MAX), i32, int32_t);
-                case JSDRV_UNION_I64: AS_F64((v < 0) || (v > INT32_MAX), i64, int64_t);
+                case JSDRV_UNION_U64: AS_F64((v < 0) || (v >= 18446744073709551616.0), u64, uint64_t);
+                case JSDRV_UNION_I8:  AS_F64((v < INT8_MIN) || (v > INT8_MAX), i8, int8_t);
+                case JSDRV_UNION_I16: AS_F64((v < INT16_MIN) || (v > INT16_MAX), i16, int16_t);
+                case JSDRV_UNION_I32: AS_F64((v < INT32_MIN) || (v > INT32_MAX), i32, int32_t);
+                case JSDRV_UNION_I64: AS_F64((v < -9223372036854775808.0) || (v >= 9223372036854775808.0), i64, int64_t);
                 case JSDRV_UNION_F32: x->value.f32 = (float) x->value.f64; break;
                 case JSDRV_UNION_F64: break;
                 default: rv = JSDRV_ERROR_PARAMETER_INVALID; break;
@@ -237,6 +241,45 @@ static const char * flags_to_str(uint8_t flags) {
     }
 }
 
+// tinyprintf has no float support; format as scientific notation with
+// 9 significant digits, adequate for logging and user display.
+static void f64_to_str(double v, char * str, uint32_t str_len) {
+    if (v != v) {  // NaN
+        jsdrv_cstr_copy(str, "nan", str_len);
+        return;
+    }
+    int neg = 0;
+    if (v < 0) {
+        neg = 1;
+        v = -v;
+    }
+    if (v > 1.7976931348623157e308) {  // infinity
+        jsdrv_cstr_copy(str, neg ? "-inf" : "inf", str_len);
+        return;
+    }
+    int exponent = 0;
+    if (v != 0.0) {
+        while (v >= 10.0) {
+            v /= 10.0;
+            ++exponent;
+        }
+        while (v < 1.0) {
+            v *= 10.0;
+            --exponent;
+        }
+    }
+    uint64_t digits = (uint64_t) (v * 100000000.0 + 0.5);  // 9 significant digits
+    if (digits >= 1000000000ULL) {  // rounding overflow, e.g. 9.9999...
+        digits /= 10;
+        ++exponent;
+    }
+    tfp_snprintf(str, str_len, "%s%u.%08ue%d",
+                 neg ? "-" : "",
+                 (unsigned int) (digits / 100000000ULL),
+                 (unsigned int) (digits % 100000000ULL),
+                 exponent);
+}
+
 int32_t jsdrv_union_value_to_str(const struct jsdrv_union_s * value, char * str, uint32_t str_len, uint32_t opts) {
     if (str_len < 8) {
         if ((NULL != str) && str_len) {
@@ -259,23 +302,23 @@ int32_t jsdrv_union_value_to_str(const struct jsdrv_union_s * value, char * str,
         str_len -= 7;
     }
     switch (value->type) {
-        case JSDRV_UNION_NULL: return 0;
+        case JSDRV_UNION_NULL: str[0] = 0; return 0;
         case JSDRV_UNION_STR:  jsdrv_cstr_copy(str, value->value.str, str_len); return 0;
         case JSDRV_UNION_JSON: jsdrv_cstr_copy(str, value->value.str, str_len); return 0;
         case JSDRV_UNION_BIN:  tfp_snprintf(str, str_len, "size=%d", (int) value->size); return 0;
         case JSDRV_UNION_STDMSG: tfp_snprintf(str, str_len, "size=%d", (int) value->size); return 0;
         case JSDRV_UNION_FRAME: tfp_snprintf(str, str_len, "size=%d", (int) value->size); return 0;
-        case JSDRV_UNION_F32:  return 0;
-        case JSDRV_UNION_F64:  return 0;
+        case JSDRV_UNION_F32:  f64_to_str((double) value->value.f32, str, str_len); return 0;
+        case JSDRV_UNION_F64:  f64_to_str(value->value.f64, str, str_len); return 0;
         case JSDRV_UNION_U8:   tfp_snprintf(str, str_len, "%" PRIu32, (uint32_t) value->value.u8); return 0;
         case JSDRV_UNION_U16:  tfp_snprintf(str, str_len, "%" PRIu32, (uint32_t) value->value.u16); return 0;
         case JSDRV_UNION_U32:  tfp_snprintf(str, str_len, "%" PRIu32, (uint32_t) value->value.u32); return 0;
-        case JSDRV_UNION_U64:  tfp_snprintf(str, str_len, "%" PRIu32, (uint32_t) value->value.u64); return 0;
+        case JSDRV_UNION_U64:  tfp_snprintf(str, str_len, "%llu", (unsigned long long) value->value.u64); return 0;
         case JSDRV_UNION_I8:   tfp_snprintf(str, str_len, "%" PRId32, (int32_t) value->value.i8); return 0;
         case JSDRV_UNION_I16:  tfp_snprintf(str, str_len, "%" PRId32, (int32_t) value->value.i16); return 0;
         case JSDRV_UNION_I32:  tfp_snprintf(str, str_len, "%" PRId32, (int32_t) value->value.i32); return 0;
-        case JSDRV_UNION_I64:  tfp_snprintf(str, str_len, "%" PRId32, (int32_t) value->value.i64); return 0;
-        default: return 0;
+        case JSDRV_UNION_I64:  tfp_snprintf(str, str_len, "%lld", (long long) value->value.i64); return 0;
+        default: str[0] = 0; return 0;
     }
 }
 
