@@ -44,6 +44,9 @@
 #define INTERVAL_MS                 (100U)
 #define SENSOR_COMMAND_TIMEOUT_MS   (3000U)
 #define FRAME_SIZE_BYTES            (512U)
+// Fill missing samples for skips up to this many frames (~32 ms at 2 MSPS);
+// larger skips indicate resync/restart and accept the discontinuity.
+#define PKT_INDEX_SKIP_FILL_MAX     (512U)
 #define ROE JSDRV_RETURN_ON_ERROR
 #define SAMPLING_FREQUENCY          (2000000U)
 #define STREAM_PAYLOAD_FULL         (JSDRV_STREAM_DATA_SIZE - JSDRV_STREAM_HEADER_SIZE - JS220_USB_FRAME_LENGTH)
@@ -1481,14 +1484,19 @@ static void handle_stream_in_frame(struct js110_dev_s * d, uint32_t * p_u32) {
         return;
     }
     if ((d->packet_index & 0xffff) != pkt_index) {
-        JSDRV_LOGW("pkt_index skip: expected %d, received %d", d->packet_index, pkt_index);
-        //while ((d->packet_index & 0xffff) != pkt_index) {
-        //    for (uint32_t i = 2; i < (FRAME_SIZE_BYTES / 4); ++i) {
-        //        handle_sample(d, 0xffffffffLU, voltage_range);
-        //    }
-        //    d->packet_index = (d->packet_index + 1) & 0xffff;
-        //}
-        // todo handle skips better.
+        uint32_t skip = (uint32_t) ((pkt_index - d->packet_index) & 0xffff);
+        JSDRV_LOGW("pkt_index skip: expected %d, received %d (%lu frames)",
+                   (int) (d->packet_index & 0xffff), (int) pkt_index, skip);
+        if (skip <= PKT_INDEX_SKIP_FILL_MAX) {
+            // insert missing samples so sample_id, the time map, and
+            // statistics block boundaries stay aligned to wall clock
+            for (uint32_t k = 0; k < skip; ++k) {
+                for (uint32_t i = 2; i < (FRAME_SIZE_BYTES / 4); ++i) {
+                    handle_sample(d, 0xffffffffLU, voltage_range);
+                }
+            }
+        }
+        // larger skips (resync, reorder, or restart) accept the discontinuity
         d->packet_index = pkt_index;
     }
     jsdrv_tmf_add(d->time_map_filter, d->sample_id, jsdrv_time_utc());

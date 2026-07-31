@@ -1360,6 +1360,11 @@ static bool handle_cmd(struct js320_drv_s * self,
         // only h/fs sets a residual host factor.
         struct jsdrv_union_s v = *value;
         int32_t rc = jsdrv_union_as_type(&v, JSDRV_UNION_U32);
+        if ((0 == rc) && (v.value.u32 > 1000U)) {
+            // register max; larger values silently produce a rate the
+            // host reports but the gateware does not deliver
+            rc = JSDRV_ERROR_PARAMETER_INVALID;
+        }
         if (0 == rc) {
             self->signal_host_factor = 1U;
             js320_apply_signal_dwn_n(self, dev, v.value.u32);
@@ -1386,6 +1391,9 @@ static bool handle_cmd(struct js320_drv_s * self,
         // 3=majority) and forward through the shared apply helper.
         struct jsdrv_union_s v = *value;
         int32_t rc = jsdrv_union_as_type(&v, JSDRV_UNION_U32);
+        if ((0 == rc) && (v.value.u32 > 3U)) {
+            rc = JSDRV_ERROR_PARAMETER_INVALID;
+        }
         if (0 == rc) {
             js320_apply_gpi_dwn_mode(self, dev, v.value.u32);
         }

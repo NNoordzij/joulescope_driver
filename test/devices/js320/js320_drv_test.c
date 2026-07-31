@@ -407,6 +407,42 @@ static void test_h_fp_clamp_zero(void ** state) {
 }
 
 
+// --- Tests: dwnN register validation ---
+
+static void test_dwn_n_reject_too_large(void ** state) {
+    // register max is 1000; larger values were silently forwarded and
+    // produced a rate the host reported but the gateware cannot deliver
+    struct js320_drv_s * self = *state;
+    uint32_t n_prev = self->signal_dwn_n;
+    bool handled = self->drv.handle_cmd(&self->drv, NULL, "s/dwnN/N", &jsdrv_union_u32_r(5000));
+    assert_true(handled);
+    assert_int_equal(n_prev, self->signal_dwn_n);
+    assert_int_equal(0, count_publishes("s/dwnN/N"));
+    assert_int_equal(1, g_cap.return_code_count);
+    assert_int_not_equal(0, g_cap.return_codes[0].rc);
+}
+
+static void test_dwn_n_accept_max(void ** state) {
+    struct js320_drv_s * self = *state;
+    bool handled = self->drv.handle_cmd(&self->drv, NULL, "s/dwnN/N", &jsdrv_union_u32_r(1000));
+    assert_true(handled);
+    assert_int_equal(1000, self->signal_dwn_n);
+    assert_int_equal(1, count_publishes("s/dwnN/N"));
+    assert_int_equal(0, g_cap.return_codes[0].rc);
+}
+
+static void test_gpi_dwn_mode_reject_invalid(void ** state) {
+    struct js320_drv_s * self = *state;
+    uint32_t mode_prev = self->gpi_dwn_mode;
+    bool handled = self->drv.handle_cmd(&self->drv, NULL, "s/gpi/+/dwnN/mode", &jsdrv_union_u32_r(4));
+    assert_true(handled);
+    assert_int_equal(mode_prev, self->gpi_dwn_mode);
+    assert_int_equal(0, count_publishes("s/gpi/+/dwnN/mode"));
+    assert_int_equal(1, g_cap.return_code_count);
+    assert_int_not_equal(0, g_cap.return_codes[0].rc);
+}
+
+
 // --- Tests: smart power state machine ---
 
 static void test_smart_power_enable_i_only(void ** state) {
@@ -1253,6 +1289,9 @@ int main(void) {
         cmocka_unit_test_setup_teardown(test_h_fp_default,                   test_setup, test_teardown),
         cmocka_unit_test_setup_teardown(test_h_fp_set,                       test_setup, test_teardown),
         cmocka_unit_test_setup_teardown(test_h_fp_clamp_zero,                test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_dwn_n_reject_too_large,         test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_dwn_n_accept_max,               test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_gpi_dwn_mode_reject_invalid,    test_setup, test_teardown),
         cmocka_unit_test_setup_teardown(test_smart_power_enable_i_only,      test_setup, test_teardown),
         cmocka_unit_test_setup_teardown(test_smart_power_iv_no_compute,      test_setup, test_teardown),
         cmocka_unit_test_setup_teardown(test_smart_power_ivp_high_rate_host_compute, test_setup, test_teardown),

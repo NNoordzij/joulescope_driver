@@ -35,22 +35,22 @@ emulated device proposal in `emulated_device.md`.
 - [x] P1.1 `src/log.c:65-77` — missing commas collapse the 11-entry level
       name table to 9; `jsdrv_log_level_to_str()` returns NULL for
       DEBUG3/ALL and wrong names for NOTICE..DEBUG2.
-- [ ] P2.1 `src/devices/js220/js220_usb.c:1182-1194,1526-1527` — JS220
+- [x] P2.1 `src/devices/js220/js220_usb.c:1182-1194,1526-1527` — JS220
       `h/i_scale`/`h/v_scale` broken two ways: metadata published without
       `$` suffix (JSON becomes the retained value), and the handler reads
       the unconverted `msg->value.value.f64` instead of the converted copy.
-- [ ] P2.2 `src/devices/js220/js220_usb.c:1088-1096,1017-1027` — `h/fp=0`
+- [x] P2.2 `src/devices/js220/js220_usb.c:1088-1096,1017-1027` — `h/fp=0`
       and `h/fs=0` accepted → division by zero (`:1413`,
       `SAMPLING_FREQUENCY / d->fs`).  JS320 has the guard
       (`js320_drv.c:1330-1332`); JS220 does not.
-- [ ] P2.3 `src/devices/js110/js110_stats.c:30` — `f->max = FLT_MIN`
+- [x] P2.3 `src/devices/js110/js110_stats.c:30` — `f->max = FLT_MIN`
       (+1.18e-38) instead of `-FLT_MAX`: wrong max for negative signals.
       Also `:81-84` divide-by-zero when `valid_count == 0`; `scnt == 0`
       silently stops statistics forever.
-- [ ] P2.5 `src/devices/js110/js110_usb.c:1461-1471` — packet-skip fill
+- [x] P2.5 `src/devices/js110/js110_usb.c:1461-1471` — packet-skip fill
       loop is commented out (`// todo handle skips better`); on USB skips
       `sample_id` stops tracking wall clock: permanent sample misalignment.
-- [ ] P2.7 `src/devices/js320/js320_stats.c:55,65` — `decimate_factor`
+- [x] P2.7 `src/devices/js320/js320_stats.c:55,65` — `decimate_factor`
       truncated to `uint8_t` (256 → 0) and unguarded `src->decimate == 0`;
       downstream `sample_freq / decimate_factor` divides by zero.
       `jsdrv_statistics_s.decimate_factor` (jsdrv.h:326) is too narrow.
@@ -109,23 +109,24 @@ emulated device proposal in `emulated_device.md`.
 
 ### Device drivers
 
-- [ ] P2.4 `src/devices/js110/js110_sample_processor.c:160-171` — NaN
+- [x] P2.4 `src/devices/js110/js110_sample_processor.c:160-171` — NaN
       suppression mode decrements `_suppress_samples_counter` then the
       next block re-increments it; NaN window tracks the wrong counter and
       the first post-switch sample is never NaN'd.
-- [ ] P2.6 `src/devices/js110/js110_usb.c:972-994` — suppression params
+- [x] P2.6 `src/devices/js110/js110_usb.c:972-994` — suppression params
       assigned raw with no clamp (`SUPPRESS_*_MAX` macros dead,
       `js110_sample_processor.c:24-26`); `js110_sp_suppress_win` return
       code discarded (`:981-984`); `s/i/lsb_src` accepts option-less 1.
-- [ ] P2.8 `src/devices/js320/js320_drv.c:1177-1192` — `h/fs` retunes only
-      channels 5-7; GPI/trigger/range keep streaming at full rate (JS220
-      retunes both).  `:1353-1403` `s/dwnN/N` and `s/gpi/+/dwnN/*` accept
-      any u32 (valid 4..1000, `downsample_sinc.c:31`); stale
-      `signal_host_factor` re-applied after `s/dwnN/mode` bypass toggle.
-- [ ] P2.9 `src/downsample.c:301-309` — `jsdrv_downsample_add_u8` lacks
+- [x] P2.8 (partial) — `s/dwnN/N` now rejects > 1000 and
+      `s/gpi/+/dwnN/mode` rejects > 3.  Moved to Phase 6 (needs gateware
+      knowledge / product decision): `h/fs` retuning the GPI/trigger/
+      range family to match JS220; the `s/gpi/+/dwnN/N` register upper
+      bound; whether `s/dwnN/mode` bypass toggle should clear the h/fs
+      residual `signal_host_factor` or restore it.
+- [x] P2.9 `src/downsample.c:301-309` — `jsdrv_downsample_add_u8` lacks
       the NULL-self guard `add_f32` has; JS110 callers pass NULL-able
       pointer (`js110_usb.c:1384,1405`).
-- [ ] P2 (js220) `js220_usb.c:1099-1106,1524,1532` — `h/filter` accepts
+- [x] P2 (js220) `js220_usb.c:1099-1106,1524,1532` — `h/filter` accepts
       out-of-range values; metadata is version-gated but value publish and
       handler are not → host/instrument decimation disagreement on
       FW < 1.3.0.
