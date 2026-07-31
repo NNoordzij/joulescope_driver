@@ -53,16 +53,16 @@ class FakeDriver:
             fn(topic, value)
 
 
-def _stream_value(sample_id, data):
+def _stream_value(sample_id, data, sample_rate=_SAMPLE_RATE, decimate_factor=1):
     return {
         'sample_id': sample_id,
-        'utc': time64.HOUR + (sample_id * time64.SECOND) // _SAMPLE_RATE,
+        'utc': time64.HOUR + (sample_id * time64.SECOND) // sample_rate,
         'field_id': 0,
         'index': 0,
-        'sample_rate': _SAMPLE_RATE,
-        'decimate_factor': 1,
+        'sample_rate': sample_rate,
+        'decimate_factor': decimate_factor,
         'time_map': {'offset_time': time64.HOUR, 'offset_counter': 0,
-                     'counter_rate': float(_SAMPLE_RATE)},
+                     'counter_rate': float(sample_rate)},
         'data': data,
     }
 
@@ -80,12 +80,15 @@ class TestRecord(unittest.TestCase):
         if os.path.isfile(self.filename):
             os.remove(self.filename)
 
+    def _signal_by_name(self, reader, name):
+        for s in reader.signals.values():
+            if s.name == name:
+                return s
+        raise KeyError(name)
+
     def _read_signal(self, name, length):
         with Reader(self.filename) as r:
-            for signal in r.signals.values():
-                if signal.name == name:
-                    return r.fsr(signal.signal_id, 0, length)
-        raise KeyError(name)
+            return r.fsr(self._signal_by_name(r, name).signal_id, 0, length)
 
     def test_f32_roundtrip(self):
         r = Record(self.driver, 'u/js220/000001', signals=['current'])
@@ -124,6 +127,31 @@ class TestRecord(unittest.TestCase):
         unpacked[1::2] = (data >> 4) & 0x0f
         np.testing.assert_array_equal(expect, unpacked[:1000])
 
+    def test_trigger_in_short_name(self):
+        # 'T' selects trigger_in, streamed as u1 on s/gpi/7
+        r = Record(self.driver, 'u/js320/000001', signals=['T'])
+        r.open(self.filename)
+        expect = (np.arange(1024) & 1).astype(np.uint8)
+        packed = np.packbits(expect, bitorder='little')
+        self.driver.inject('u/js320/000001/s/gpi/7/!data', _stream_value(0, packed))
+        r.close()
+        data = self._read_signal('trigger_in', 1024)
+        unpacked = np.unpackbits(np.asarray(data), bitorder='little')[:1024]
+        np.testing.assert_array_equal(expect, unpacked)
+
+    def test_decimated_sample_rate(self):
+        # the recorded rate must be sample_rate // decimate_factor
+        r = Record(self.driver, 'u/js320/000001', signals=['current'])
+        r.open(self.filename)
+        data = np.zeros(1000, dtype=np.float32)
+        self.driver.inject('u/js320/000001/s/i/!data',
+                           _stream_value(0, data, sample_rate=16000000, decimate_factor=16))
+        r.close()
+        with Reader(self.filename) as rd:
+            s = self._signal_by_name(rd, 'current')
+            self.assertEqual(1000000, s.sample_rate)
+            self.assertEqual(1000, s.length)
+
     def test_multi_device_single_subscribe(self):
         # each (device, signal) pair must subscribe and enable exactly once
         paths = ['u/js220/000001', 'u/js220/000002']
@@ -135,9 +163,14 @@ class TestRecord(unittest.TestCase):
         self.assertEqual(2, len(enables))
         self.assertEqual(sorted([f'{p}/s/i/ctrl' for p in paths]),
                          sorted([p[0] for p in enables]))
+        for path in paths:
+            self.driver.inject(f'{path}/s/i/!data',
+                               _stream_value(0, np.zeros(100, dtype=np.float32)))
         r.close()
         for path in paths:
             self.assertEqual(0, len(self.driver.subscriptions[f'{path}/s/i/!data']))
+        with Reader(self.filename) as rd:
+            self.assertEqual(2, len(rd.signals) - 1)  # signal 0 reserved
 
     def test_close_twice(self):
         r = Record(self.driver, 'u/js220/000001', signals=['current'])
