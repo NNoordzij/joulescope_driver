@@ -4,6 +4,101 @@
 This file contains the list of changes made to the Joulescope driver.
 
 
+## 2.4.0
+
+2026 Jul 31
+
+* Performed a full design review focused on incomplete and partially
+  complete features; findings and remaining work are tracked in
+  doc/plans/design_review_2026-07.md.
+* Repurposed jsdrv_statistics_s reserved rsv3_u32 as decimate_factor32.
+  The u8 decimate_factor truncated for JS320 (e.g. 256 -> 0) and now
+  saturates at 255; consumers should prefer decimate_factor32 and fall
+  back to decimate_factor when it reads 0 (older producers).
+* Fixed memory buffer (stream buffer) issues.
+  * Fixed process abort when buffering signals with unsupported element
+    types (JS320 s/adc/N/!data INT32, s/uart/!data UINT8); the signal is
+    now rejected gracefully and removed from the signal list.
+  * Fixed u1/u4 write path bit alignment: message lengths that left the
+    ring at a sub-byte offset silently corrupted all subsequent samples.
+  * Fixed skip-fill zero fill, which mixed sample and byte units.
+  * Bounded time map growth over long captures: expiration now runs as
+    the ring wraps (previously unbounded with an O(N) copy per message).
+  * Implemented the documented g/hold clear on the 1 -> 0 transition.
+  * Fixed request pool leak on failed requests and the finalize
+    off-by-one that leaked buffer id 16's thread on shutdown.
+* Fixed JS220 issues.
+  * Fixed h/i_scale and h/v_scale, which were completely broken: the
+    metadata published without the $ suffix (JSON became the retained
+    value) and the handler read the unconverted union value.
+  * Rejected h/fs=0 and h/fp=0 (divide-by-zero) and invalid h/filter
+    values; sinc1 now rejects on firmware/FPGA < 1.3.0 instead of
+    desynchronizing host and instrument decimation.
+  * h/fs coercion (sinc1 signal_n 2/3 forced to 4) now logs and
+    republishes the actual rate.
+* Fixed JS110 issues.
+  * Fixed statistics max initialization (-FLT_MAX, not FLT_MIN), which
+    reported max ~0 for always-negative signals; all-NaN blocks now
+    report NaN instead of dividing by zero; rejected s/stats/scnt=0.
+  * Fixed NaN current-range suppression to NaN exactly the window
+    samples (previously 2*window+post, including the samples the
+    mean/interp estimates depend on).
+  * Restored missing-sample fill on USB packet skips (up to 512 frames)
+    so sample_id, the time map, and statistics stay wall-clock aligned.
+  * Validated the current-range suppression parameters against the
+    sample processor limits.
+* Fixed JS320 issues.
+  * Rejected s/dwnN/N above the 1000 register maximum and
+    s/gpi/+/dwnN/mode above 3.
+  * Rejected statistics messages with decimate=0 (divide-by-zero).
+* Fixed C core issues.
+  * Fixed log level name table (missing commas): levels 5-8 reported
+    wrong names and 9-10 returned NULL.
+  * Fixed jsdrv_union_value_to_str for f32/f64/null (wrote nothing,
+    leaving log buffers uninitialized) and u64/i64 (truncated to 32-bit).
+  * Fixed jsdrv_union_as_type f64 conversions, which rejected all
+    negative values for signed targets and limited u64/i64 to 32-bit.
+  * jsdrv_union_eq now compares STDMSG/FRAME payloads (pubsub
+    deduplication never applied to them).
+  * Hardened JSON parsing: literals are now actually compared ("txyz"
+    parsed as true), integers parse to i64 with overflow rejection, and
+    nesting depth is bounded (metadata is untrusted device input).
+  * Fixed metadata range parsing buffer overflow on malformed ranges.
+  * Fixed frontend NULL dereference when subscribing to a removed
+    device, and a dangling device list node on factory failure.
+* Fixed backend and mb_device issues.
+  * Bounded the libusb shutdown wait at 10 s (previously could hang
+    process exit forever if a device never went idle).
+  * Fixed libusb bulk_in_close endpoint id mismatch (latent).
+  * POSIX driver threads now sleep for the scheduled timeout instead of
+    busy-polling every 2 ms.
+  * mb_device now answers device-initiated link PINGs with PONG and
+    rejects device publishes with JSDRV_ERROR_CLOSED while not open.
+* Fixed pyjoulescope_driver issues.
+  * Fixed Record for u1/u4 signals (current_range, gpi, trigger_in):
+    only fsr_f32 was ever called, so these recorded garbage.
+  * Fixed Record multi-device open, which subscribed every signal once
+    per device and duplicated every JLS write; close() is now
+    idempotent.  Added record round-trip unit tests.
+  * statistics CLI now supports the JS320; measure CLI returns a
+    consistent dict, supports the JS110, and survives early interrupt;
+    info CLI reports JS320 versions; threads CLI filters to JS220.
+  * Exported TimeMap; corrected the open 'defaults' docstring to the
+    2026-06 semantics.
+* Fixed node_api issues.
+  * Implemented the stream buffer info/response converters, which
+    returned undefined; unknown binary payloads now convert to
+    Uint8Array.
+  * Fixed the test to actually fail on error and run it in CI.
+* Removed the dead src/emu.c / src/emulated.c skeleton (never compiled);
+  a fresh emulated-device design is proposed in
+  doc/plans/emulated_device.md.
+* Registered dbc_test and boot_info_test with ctest; removed the dead
+  test_invariant_tmap.c.
+* Fixed README Python requirement (3.12+) and published the JS220 topic
+  reference and JS320 calibration/firmware-update docs on the docs site.
+
+
 ## 2.3.5
 
 2026 Jul 31
