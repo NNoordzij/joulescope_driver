@@ -1,5 +1,5 @@
 /*
- * Copyright 2024 Jetperch LLC
+ * Copyright 2024-2026 Jetperch LLC
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,8 +24,14 @@ async function testBasic(){
     var drv = new JoulescopeDriver();
     var device_paths = drv.device_paths();
     console.log('device_paths: ' + device_paths);
+    assert.ok(Array.isArray(device_paths), 'device_paths must be an array');
     drv.finalize();
-    console.log('testBasic passed')
+    console.log('testBasic passed');
 }
 
-assert.doesNotThrow(async() => {await testBasic()}, undefined, "testBasic threw an exception");
+// assert.doesNotThrow cannot observe an async rejection; await instead so
+// any failure rejects the promise and fails the process with exit code 1.
+testBasic().catch((err) => {
+    console.error('testBasic FAILED:', err);
+    process.exit(1);
+});

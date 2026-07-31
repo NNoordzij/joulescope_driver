@@ -409,6 +409,12 @@ jobs:
           npm update
           prebuildify --napi --strip --target 20.12.2
 
+      - name: Test
+        shell: bash
+        run: |
+          cd node_api
+          npm test
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v5
         with:

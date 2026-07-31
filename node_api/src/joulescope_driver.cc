@@ -274,12 +274,80 @@ static Napi::Value stats_to_js(Napi::Env env, const struct jsdrv_union_s * value
     return obj;
 }
 
+// Note: int64/uint64 values convert to JavaScript Number (double),
+// matching the existing stream/statistics converters.
+static Napi::Value buffer_info_inner_to_js(Napi::Env env, const struct jsdrv_buffer_info_s * info) {
+    Napi::Object obj = Napi::Object::New(env);
+    obj.Set("version", info->version);
+    obj.Set("field_id", info->field_id);
+    obj.Set("index", info->index);
+    obj.Set("element_type", info->element_type);
+    obj.Set("element_size_bits", info->element_size_bits);
+    obj.Set("topic", info->topic);
+    obj.Set("decimate_factor", info->decimate_factor);
+    obj.Set("size_in_utc", (double) info->size_in_utc);
+    obj.Set("size_in_samples", (double) info->size_in_samples);
+    Napi::Object utc = Napi::Object::New(env);
+    utc.Set("start", (double) info->time_range_utc.start);
+    utc.Set("end", (double) info->time_range_utc.end);
+    utc.Set("length", (double) info->time_range_utc.length);
+    obj.Set("time_range_utc", utc);
+    Napi::Object samples = Napi::Object::New(env);
+    samples.Set("start", (double) info->time_range_samples.start);
+    samples.Set("end", (double) info->time_range_samples.end);
+    samples.Set("length", (double) info->time_range_samples.length);
+    obj.Set("time_range_samples", samples);
+    obj.Set("time_map", obj_time_map(env, &info->time_map));
+    return obj;
+}
+
 static Napi::Value buffer_info_to_js(Napi::Env env, const struct jsdrv_union_s * value) {
-    return env.Undefined(); // todo
+    const struct jsdrv_buffer_info_s * info = (const struct jsdrv_buffer_info_s *) value->value.bin;
+    return buffer_info_inner_to_js(env, info);
 }
 
 static Napi::Value buffer_rsp_to_js(Napi::Env env, const struct jsdrv_union_s * value) {
-    return env.Undefined(); // todo
+    const struct jsdrv_buffer_response_s * r = (const struct jsdrv_buffer_response_s *) value->value.bin;
+    Napi::Object obj = Napi::Object::New(env);
+    obj.Set("version", r->version);
+    obj.Set("rsp_id", (double) r->rsp_id);
+    obj.Set("info", buffer_info_inner_to_js(env, &r->info));
+    size_t length = (size_t) r->info.time_range_samples.length;
+    const uint8_t * src_u8 = (const uint8_t *) r->data;
+    if (JSDRV_BUFFER_RESPONSE_SAMPLES == r->response_type) {
+        obj.Set("response_type", "samples");
+        if ((JSDRV_DATA_TYPE_FLOAT == r->info.element_type) && (32 == r->info.element_size_bits)) {
+            Napi::Float32Array data = Napi::Float32Array::New(env, length);
+            const float * src = (const float *) r->data;
+            for (size_t idx = 0; idx < length; ++idx) {
+                data[idx] = src[idx];
+            }
+            obj.Set("data", data);
+        } else if ((JSDRV_DATA_TYPE_UINT == r->info.element_type) && (1 == r->info.element_size_bits)) {
+            // unpack to one sample per entry, matching stream_to_js
+            Napi::Uint8Array data = Napi::Uint8Array::New(env, length);
+            for (size_t idx = 0; idx < length; ++idx) {
+                data[idx] = (src_u8[idx >> 3] >> (idx & 7)) & 1;
+            }
+            obj.Set("data", data);
+        } else if ((JSDRV_DATA_TYPE_UINT == r->info.element_type) && (4 == r->info.element_size_bits)) {
+            Napi::Uint8Array data = Napi::Uint8Array::New(env, length);
+            for (size_t idx = 0; idx < length; ++idx) {
+                data[idx] = (src_u8[idx >> 1] >> (4 * (idx & 1))) & 0x0f;
+            }
+            obj.Set("data", data);
+        }
+    } else if (JSDRV_BUFFER_RESPONSE_SUMMARY == r->response_type) {
+        // flat [length][4] float32 entries: avg, std, min, max
+        obj.Set("response_type", "summary");
+        Napi::Float32Array data = Napi::Float32Array::New(env, length * 4);
+        const float * src = (const float *) r->data;
+        for (size_t idx = 0; idx < (length * 4); ++idx) {
+            data[idx] = src[idx];
+        }
+        obj.Set("data", data);
+    }
+    return obj;
 }
 
 static Napi::Value bin_to_js(Napi::Env env, const struct jsdrv_union_s * value) {
@@ -288,8 +356,14 @@ static Napi::Value bin_to_js(Napi::Env env, const struct jsdrv_union_s * value) 
         case JSDRV_PAYLOAD_TYPE_STATISTICS: return stats_to_js(env, value);
         case JSDRV_PAYLOAD_TYPE_BUFFER_INFO: return buffer_info_to_js(env, value);
         case JSDRV_PAYLOAD_TYPE_BUFFER_RSP: return buffer_rsp_to_js(env, value);
-        default:
-            return env.Undefined(); // todo
+        default: {
+            // raw binary payload: copy to a Uint8Array
+            Napi::Uint8Array data = Napi::Uint8Array::New(env, value->size);
+            for (size_t idx = 0; idx < value->size; ++idx) {
+                data[idx] = value->value.bin[idx];
+            }
+            return data;
+        }
     }
 }
 
