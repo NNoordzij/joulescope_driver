@@ -39,6 +39,7 @@ void js110_stats_initialize(struct js110_stats_s * self) {
     struct jsdrv_statistics_s * s = &self->statistics;
     s->version = 1;
     s->decimate_factor = 1;
+    s->decimate_factor32 = 1;
     s->block_sample_count = 1000000;
     s->sample_freq = 2000000;
     js110_stats_clear(self);
@@ -53,6 +54,7 @@ void js110_stats_clear(struct js110_stats_s * self) {
     self->energy.u64[1] = 0;
     struct jsdrv_statistics_s * s = &self->statistics;
     s->decimate_factor = 1;
+    s->decimate_factor32 = 1;
     s->block_sample_id = 0;
     s->accum_sample_id = 0;
     clear(self);

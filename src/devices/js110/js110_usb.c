@@ -622,7 +622,7 @@ static void statistics_fwd(struct js110_dev_s * d, struct js110_host_status_s co
     dst->decimate_factor = 1;
     dst->block_sample_count = s->samples_this;
     dst->sample_freq = s->samples_per_second;
-    dst->rsv3_u32 = 0;
+    dst->decimate_factor32 = 1;
     dst->block_sample_id = s->samples_total;
     dst->accum_sample_id = 0;
 

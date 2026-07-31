@@ -77,10 +77,42 @@ static void test_zero_sample_count(void ** state) {
     struct jsdrv_statistics_s dst;
     memset(&src, 0, sizeof(src));
     src.header = (1U << 24) | (1U << 16);  // version=1, type=1
+    src.decimate = 16;
     src.sample_count = 0;
     assert_int_equal(0, js320_stats_convert(&src, &dst));
     assert_int_equal(1, dst.version);
     assert_int_equal(0, dst.block_sample_count);
+}
+
+static void test_zero_decimate_rejected(void ** state) {
+    // decimate 0 previously divided by zero downstream
+    (void) state;
+    struct js320_statistics_raw_s src;
+    struct jsdrv_statistics_s dst;
+    memset(&src, 0, sizeof(src));
+    src.header = (1U << 24) | (1U << 16);  // version=1, type=1
+    src.decimate = 0;
+    src.sample_count = 100;
+    assert_int_not_equal(0, js320_stats_convert(&src, &dst));
+}
+
+static void test_large_decimate_no_truncation(void ** state) {
+    // decimate 256 previously truncated to 0 in the u8 field
+    (void) state;
+    uint32_t n = 100;
+    struct js320_statistics_raw_s src;
+    struct jsdrv_statistics_s dst;
+    memset(&src, 0, sizeof(src));
+    src.header = (1U << 24) | (1U << 16);  // version=1, type=1
+    src.decimate = 256;  // s/dwnN/N = 16 -> 16 * 16
+    src.sample_freq = 16000000;
+    src.sample_count = n;
+    fill_channel_constant(&src.i, 1.0, n);
+    fill_channel_constant(&src.v, 1.0, n);
+    fill_channel_constant(&src.p, 1.0, n);
+    assert_int_equal(0, js320_stats_convert(&src, &dst));
+    assert_int_equal(255, dst.decimate_factor);      // saturated, not 0
+    assert_int_equal(256, dst.decimate_factor32);    // exact
 }
 
 static void test_constant_signal(void ** state) {
@@ -148,6 +180,8 @@ int main(void) {
     const struct CMUnitTest tests[] = {
         cmocka_unit_test(test_invalid_header),
         cmocka_unit_test(test_zero_sample_count),
+        cmocka_unit_test(test_zero_decimate_rejected),
+        cmocka_unit_test(test_large_decimate_no_truncation),
         cmocka_unit_test(test_constant_signal),
         cmocka_unit_test(test_struct_size),
     };

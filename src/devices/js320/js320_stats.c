@@ -50,9 +50,17 @@ int32_t js320_stats_convert(
         return JSDRV_ERROR_MESSAGE_INTEGRITY;
     }
 
+    if (0 == src->decimate) {
+        JSDRV_LOGW("js320 statistics invalid decimate 0");
+        return JSDRV_ERROR_MESSAGE_INTEGRITY;
+    }
+
     memset(dst, 0, sizeof(*dst));
     dst->version = 1;
-    dst->decimate_factor = (uint8_t) src->decimate;
+    // u8 field saturates (e.g. s/dwnN/N=16 gives decimate 256); consumers
+    // use decimate_factor32 for the exact value
+    dst->decimate_factor = (src->decimate > UINT8_MAX) ? UINT8_MAX : (uint8_t) src->decimate;
+    dst->decimate_factor32 = src->decimate;
     dst->block_sample_count = src->sample_count;
     dst->sample_freq = src->sample_freq;
     dst->block_sample_id = src->block_sample_id;

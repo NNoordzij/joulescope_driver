@@ -140,7 +140,7 @@ cdef extern from "jsdrv.h":
         uint8_t decimate_factor
         uint32_t block_sample_count
         uint32_t sample_freq
-        uint32_t rsv3_u8
+        uint32_t decimate_factor32
         uint64_t block_sample_id
         uint64_t accum_sample_id
         double i_avg

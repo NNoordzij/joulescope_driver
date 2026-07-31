@@ -299,6 +299,10 @@ bool jsdrv_downsample_add_f32(struct jsdrv_downsample_s * self, uint64_t sample_
 }
 
 bool jsdrv_downsample_add_u8(struct jsdrv_downsample_s * self, uint64_t sample_id, uint8_t x_in, uint8_t * x_out) {
+    if (NULL == self) {
+        *x_out = x_in;
+        return true;
+    }
     int64_t x64 = ((int64_t) x_in) << 30;
     bool rv = jsdrv_downsample_add_i64q30(self, sample_id, x64, &x64);
     if (rv) {

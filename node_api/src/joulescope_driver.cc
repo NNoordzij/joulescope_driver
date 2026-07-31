@@ -211,7 +211,10 @@ static Napi::Value stream_to_js(Napi::Env env, const struct jsdrv_union_s * valu
 static Napi::Value stats_to_js(Napi::Env env, const struct jsdrv_union_s * value) {
     const struct jsdrv_statistics_s * s =(const struct jsdrv_statistics_s *) value->value.bin;
     uint32_t sample_freq = s->sample_freq;
-    uint64_t samples_full_rate = s->block_sample_count * (uint64_t) s->decimate_factor;
+    // u8 decimate_factor saturates at 255; decimate_factor32 has the exact
+    // value (0 from older producers - fall back)
+    uint32_t decimate_factor = s->decimate_factor32 ? s->decimate_factor32 : s->decimate_factor;
+    uint64_t samples_full_rate = s->block_sample_count * (uint64_t) decimate_factor;
     uint64_t sample_id_start = s->block_sample_id;
     uint64_t sample_id_end = s->block_sample_id + samples_full_rate;
     uint64_t t_start = sample_id_start / sample_freq;
@@ -228,7 +231,7 @@ static Napi::Value stats_to_js(Napi::Env env, const struct jsdrv_union_s * value
             "ms"));
     time.Set("range", obj_value2(env, (double) t_start, (double) (t_start + t_delta), "s"));
     time.Set("delta", obj_value1(env, (double) t_delta, "s"));
-    time.Set("decimate_factor", obj_value1(env, (double) s->decimate_factor, "samples"));
+    time.Set("decimate_factor", obj_value1(env, (double) decimate_factor, "samples"));
     time.Set("decimate_sample_count", obj_value1(env, (double) s->block_sample_count, "samples"));
     time.Set("accum_samples", obj_value2(env, (double) s->accum_sample_id, (double) sample_id_end, "samples"));
     obj.Set("time_map", obj_time_map(env, &s->time_map));
