@@ -77,6 +77,30 @@ static void test_register_before_init(void **state) {
     CHECK(&s, JSDRV_LOG_LEVEL_WARNING, 42);
 }
 
+static void test_level_to_str(void **state) {
+    (void) state;
+    static const char * const expect[] = {
+            "EMERGENCY", "ALERT", "CRITICAL", "ERROR", "WARN",
+            "NOTICE", "INFO", "DEBUG", "DEBUG2", "DEBUG3", "ALL",
+    };
+    assert_string_equal("OFF", jsdrv_log_level_to_str(JSDRV_LOG_LEVEL_OFF));
+    for (int8_t level = 0; level <= JSDRV_LOG_LEVEL_ALL; ++level) {
+        const char * s = jsdrv_log_level_to_str(level);
+        assert_non_null(s);
+        assert_string_equal(expect[level], s);
+    }
+    assert_string_equal("ALL", jsdrv_log_level_to_str(JSDRV_LOG_LEVEL_ALL + 1));
+}
+
+static void test_level_to_char(void **state) {
+    (void) state;
+    static const char expect[] = "!ACEWNIDDD.";
+    assert_int_equal('*', jsdrv_log_level_to_char(JSDRV_LOG_LEVEL_OFF));
+    for (int8_t level = 0; level <= JSDRV_LOG_LEVEL_ALL; ++level) {
+        assert_int_equal(expect[level], jsdrv_log_level_to_char(level));
+    }
+}
+
 static void test_basic(void **state) {
     (void) state;
     struct state_s s = {
@@ -95,6 +119,8 @@ static void test_basic(void **state) {
 int main(void) {
     const struct CMUnitTest tests[] = {
             cmocka_unit_test(test_register_before_init),
+            cmocka_unit_test(test_level_to_str),
+            cmocka_unit_test(test_level_to_char),
             cmocka_unit_test(test_basic),
     };
 

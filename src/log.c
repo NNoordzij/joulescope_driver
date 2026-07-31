@@ -68,10 +68,10 @@ char const * const jsdrv_log_level_str[JSDRV_LOG_LEVEL_ALL + 1] = {
         "CRITICAL",
         "ERROR",
         "WARN",
-        "NOTICE"
+        "NOTICE",
         "INFO",
         "DEBUG",
-        "DEBUG2"
+        "DEBUG2",
         "DEBUG3",
         "ALL"
 };
