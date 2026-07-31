@@ -203,6 +203,25 @@ static void buffer_alloc(struct buffer_s * self) {
     double coef_f32 = sizeof(float);
     double coef_u = 0.0;
     JSDRV_LOGI("buffer_alloc %" PRIu64, self->size);
+
+    // deactivate signals with element types the buffer cannot store
+    bool signal_list_changed = false;
+    for (uint32_t idx = 1; idx < JSDRV_BUFSIG_COUNT_MAX; ++idx) {
+        struct bufsig_s *b = &self->signals[idx];
+        if (b->active && !jsdrv_bufsig_element_type_is_supported(b->hdr.element_type, b->hdr.element_size_bits)) {
+            JSDRV_LOGE("buffer %u signal %u %s: unsupported element type=%u, size=%u bits; removing signal",
+                       self->idx, idx, b->topic,
+                       (unsigned) b->hdr.element_type, (unsigned) b->hdr.element_size_bits);
+            bufsig_unsub(b);
+            b->active = false;
+            signal_list_changed = true;
+        }
+    }
+    if (signal_list_changed) {
+        buf_publish_signal_list(self);
+    }
+
+
     size_t summary_entry_sz = sizeof(struct jsdrv_summary_entry_s);
     for (uint32_t lvl = 1; lvl < 8; ++lvl) {
         double pow_lvl = pow(32.0, lvl - 1);
@@ -254,7 +273,12 @@ static void buffer_alloc(struct buffer_s * self) {
             k = 1;
         }
         uint64_t Np = k * rZ;
-        jsdrv_bufsig_alloc(b, Np, r0, rN);
+        if (jsdrv_bufsig_alloc(b, Np, r0, rN)) {
+            bufsig_unsub(b);
+            b->active = false;
+            buf_publish_signal_list(self);
+            continue;
+        }
         bufsig_publish_info(b);
     }
 }

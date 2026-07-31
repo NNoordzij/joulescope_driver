@@ -68,6 +68,38 @@ static void test_initialize_finalize(void **state) {
     jsdrv_bufsig_free(&b);
 }
 
+static void test_element_type_support(void **state) {
+    (void) state;
+    assert_true(jsdrv_bufsig_element_type_is_supported(JSDRV_DATA_TYPE_FLOAT, 32));
+    assert_true(jsdrv_bufsig_element_type_is_supported(JSDRV_DATA_TYPE_UINT, 1));
+    assert_true(jsdrv_bufsig_element_type_is_supported(JSDRV_DATA_TYPE_UINT, 4));
+    assert_false(jsdrv_bufsig_element_type_is_supported(JSDRV_DATA_TYPE_FLOAT, 64));
+    assert_false(jsdrv_bufsig_element_type_is_supported(JSDRV_DATA_TYPE_INT, 32));
+    assert_false(jsdrv_bufsig_element_type_is_supported(JSDRV_DATA_TYPE_UINT, 8));
+    assert_false(jsdrv_bufsig_element_type_is_supported(JSDRV_DATA_TYPE_UNDEFINED, 32));
+}
+
+static void test_alloc_unsupported_element_type(void **state) {
+    (void) state;
+    struct bufsig_s b;
+    memset(&b, 0, sizeof(b));
+    jsdrv_cstr_copy(b.topic, SRC_TOPIC, sizeof(b.topic));
+    b.hdr.field_id = JSDRV_FIELD_RAW;
+    b.hdr.element_type = JSDRV_DATA_TYPE_INT;    // JS320 s/adc/N/!data
+    b.hdr.element_size_bits = 32;
+    b.hdr.decimate_factor = 1;
+    b.hdr.sample_rate = 1000000;
+    b.active = true;
+    assert_int_equal(JSDRV_ERROR_NOT_SUPPORTED, jsdrv_bufsig_alloc(&b, 1000000, 10, 10));
+    assert_null(b.level0_data);
+
+    b.hdr.element_type = JSDRV_DATA_TYPE_UINT;   // JS320 s/uart/!data
+    b.hdr.element_size_bits = 8;
+    assert_int_equal(JSDRV_ERROR_NOT_SUPPORTED, jsdrv_bufsig_alloc(&b, 1000000, 10, 10));
+    assert_null(b.level0_data);
+    jsdrv_bufsig_free(&b);
+}
+
 static void insert_samples(struct bufsig_s * b, uint64_t sample_id_start, uint32_t length) {
     struct jsdrv_stream_signal_s s;
     memset(&s, 0, sizeof(s));
@@ -580,6 +612,8 @@ static void test_summary_integration_accuracy(void **state) {
 int main(void) {
     const struct CMUnitTest tests[] = {
             cmocka_unit_test(test_initialize_finalize),
+            cmocka_unit_test(test_element_type_support),
+            cmocka_unit_test(test_alloc_unsupported_element_type),
             cmocka_unit_test(test_samples_start_length),
             cmocka_unit_test(test_samples_start_end),
             cmocka_unit_test(test_samples_all),

@@ -53,7 +53,21 @@ static struct jsdrv_summary_entry_s * level_entry(struct bufsig_s * self, uint8_
     return &lvl->data[idx];
 }
 
-void jsdrv_bufsig_alloc(struct bufsig_s * self, uint64_t N, uint64_t r0, uint64_t rN) {
+bool jsdrv_bufsig_element_type_is_supported(uint8_t element_type, uint8_t element_size_bits) {
+    if (JSDRV_DATA_TYPE_FLOAT == element_type) {
+        return (32 == element_size_bits);
+    } else if (JSDRV_DATA_TYPE_UINT == element_type) {
+        return (1 == element_size_bits) || (4 == element_size_bits);
+    }
+    return false;
+}
+
+int32_t jsdrv_bufsig_alloc(struct bufsig_s * self, uint64_t N, uint64_t r0, uint64_t rN) {
+    if (!jsdrv_bufsig_element_type_is_supported(self->hdr.element_type, self->hdr.element_size_bits)) {
+        JSDRV_LOGE("jsdrv_bufsig_alloc %d unsupported element type=%d, size=%d bits",
+                   (int) self->idx, (int) self->hdr.element_type, (int) self->hdr.element_size_bits);
+        return JSDRV_ERROR_NOT_SUPPORTED;
+    }
     JSDRV_LOGI("jsdrv_bufsig_alloc %d N=%" PRIu64 ", r0=%" PRIu64", rN=%" PRIu64,
                (int) self->idx, N, r0, rN);
     self->N = N;
@@ -77,18 +91,9 @@ void jsdrv_bufsig_alloc(struct bufsig_s * self, uint64_t N, uint64_t r0, uint64_
     self->size_in_utc = JSDRV_F64_TO_TIME(size_in_utc);
 
     if (JSDRV_DATA_TYPE_FLOAT == self->hdr.element_type) {
-        JSDRV_ASSERT(self->hdr.element_size_bits == 32);
         self->level0_data = jsdrv_alloc(self->N * sizeof(float));
-    } else if (JSDRV_DATA_TYPE_UINT == self->hdr.element_type) {
-        if (1 == self->hdr.element_size_bits) {
-            self->level0_data = jsdrv_alloc((self->N * self->hdr.element_size_bits + 7) / 8);
-        } else if (4 == self->hdr.element_size_bits) {
-            self->level0_data = jsdrv_alloc((self->N * self->hdr.element_size_bits + 1) / 2);
-        } else {
-            JSDRV_ASSERT(false);
-        }
-    } else {
-        JSDRV_ASSERT(false);
+    } else {  // JSDRV_DATA_TYPE_UINT, 1 or 4 bits
+        self->level0_data = jsdrv_alloc((self->N * self->hdr.element_size_bits + 7) / 8);
     }
     self->level0_head = 0;
     self->level0_size = 0;
@@ -108,6 +113,7 @@ void jsdrv_bufsig_alloc(struct bufsig_s * self, uint64_t N, uint64_t r0, uint64_
         JSDRV_LOGD3("alloc lvl=%d %" PRIu64, i + 1, k);
         lvl->data = jsdrv_alloc(k * sizeof(struct jsdrv_summary_entry_s));
     }
+    return 0;
 }
 
 void jsdrv_bufsig_free(struct bufsig_s * self) {
