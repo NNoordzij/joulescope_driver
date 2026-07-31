@@ -139,19 +139,19 @@ emulated device proposal in `emulated_device.md`.
 
 ### Backends / platform (Phase 5)
 
-- [ ] P5.1 `src/backend/libusb/backend.c:1036-1048` — unbounded
+- [x] P5.1 `src/backend/libusb/backend.c:1036-1048` — unbounded
       `device_close_all` loop (`// todo timeout?`): hang on exit if a
       device never idles.  WinUSB bounds joins at 10 s.
-- [ ] P5.2 `libusb/backend.c:668-701` — `bulk_in_close` clears
+- [x] P5.2 `libusb/backend.c:668-701` — `bulk_in_close` clears
       `endpoint_mode[ep]` but open sets `[ep|0x80]`; cancel comparison
       never matches.  Dead code today (no sender of STREAM_CLOSE), latent.
 - [ ] P5.3 libusb — `JSDRV_USBBK_MSG_POWER` never emitted on Linux/macOS;
       mb_device suspend-announce/revalidate is Windows-only
       (`winusb/device_change_notifier.c:97-106`, `mb_device.c:2213-2290`).
-- [ ] P5.4 `mb_device.c:2422-2428`, `js220_usb.c:372-382` — POSIX UL
+- [x] P5.4 `mb_device.c:2422-2428`, `js220_usb.c:372-382` — POSIX UL
       threads busy-poll (`poll(..., 2)` ms) instead of using the computed
       timeout; scheduling infrastructure bypassed off-Windows.
-- [ ] P5.5 `mb_device.c:1839` — device-initiated `MB_LINK_MSG_PING` never
+- [x] P5.5 `mb_device.c:1839` — device-initiated `MB_LINK_MSG_PING` never
       answered; `:1785-1786` commands to a non-open device forwarded
       instead of rejected (JS220 rejects, `js220_usb.c:1160`).
 - [ ] P5.6 `winusb/backend.c:390-393` — bulk-OUT pipe timeout commented

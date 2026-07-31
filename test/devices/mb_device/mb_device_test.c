@@ -322,6 +322,28 @@ static void inject_pong(struct jsdrvp_mb_dev_s * d) {
     jsdrvp_msg_free(d->context, m);
 }
 
+// Inject a device->host link PING through the real RX frame parser.
+static void inject_ping(struct jsdrvp_mb_dev_s * d) {
+    uint32_t frame[FRAME_SIZE_U8 >> 2];
+    memset(frame, 0, sizeof(frame));
+    uint8_t * u8 = (uint8_t *) frame;
+    uint16_t * u16 = (uint16_t *) frame;
+    u8[0] = MB_FRAME_SOF1;
+    u8[1] = MB_FRAME_SOF2;
+    u16[1] = (uint16_t) ((MB_FRAME_FT_DATA << 11) | (d->in_frame_id & MB_FRAME_FRAME_ID_MAX));
+    u8[4] = 0;  // length_u32 - 1
+    u8[5] = mb_frame_length_check(0);
+    u16[3] = (uint16_t) ((MB_LINK_MSG_PING & 0x0fffU) | (MB_FRAME_ST_LINK << 12));
+    frame[2] = 0x12345678;  // arbitrary payload to echo
+
+    struct jsdrvp_msg_s * m = jsdrvp_msg_alloc(d->context);
+    jsdrv_cstr_copy(m->topic, JSDRV_USBBK_MSG_STREAM_IN_DATA, sizeof(m->topic));
+    memcpy(m->payload.bin, frame, FRAME_SIZE_U8);
+    m->value = jsdrv_union_bin(m->payload.bin, FRAME_SIZE_U8);
+    handle_stream_in(d, m);
+    jsdrvp_msg_free(d->context, m);
+}
+
 // Enter a synthetic open session at time_now_.
 static void enter_open(struct jsdrvp_mb_dev_s * d) {
     d->state = ST_OPEN;
@@ -448,10 +470,50 @@ static void test_close_request_in_closed_acks(void ** state) {
     device_free(d);
 }
 
+// --- Test: device-initiated PING is answered with PONG ---
+
+static void test_ping_answered_with_pong(void ** state) {
+    (void) state;
+    struct jsdrvp_mb_dev_s * d = device_alloc();
+    enter_open(d);
+    inject_ping(d);
+    struct jsdrvp_msg_s * m;
+    uint32_t pongs = 0;
+    while (NULL != (m = msg_queue_pop_immediate(d->ll.cmd_q))) {
+        if (frame_is_data(m) && (frame_service_type(m) == MB_FRAME_ST_LINK)
+                && (frame_metadata(m) == MB_LINK_MSG_PONG)) {
+            const uint32_t * payload = (const uint32_t *) &m->payload.bin[8];
+            assert_int_equal(0x12345678, payload[0]);  // echoed
+            ++pongs;
+        }
+        jsdrvp_msg_free(d->context, m);
+    }
+    assert_int_equal(1, pongs);
+    device_free(d);
+}
+
+// --- Test: device publishes are rejected while not open ---
+
+static void test_publish_rejected_when_closed(void ** state) {
+    (void) state;
+    struct jsdrvp_mb_dev_s * d = device_alloc();
+    d->state = ST_CLOSED;
+    struct jsdrvp_msg_s * m = jsdrvp_msg_alloc_value(
+            d->context, "u/js320/test/s/i/ctrl", &jsdrv_union_u32_r(1));
+    backend_send_count_ = 0;
+    handle_cmd(d, m);  // frees m
+    assert_int_equal(1, backend_send_count_);
+    assert_string_equal("u/js320/test/s/i/ctrl#", backend_last_topic_);
+    assert_null(msg_queue_pop_immediate(d->ll.cmd_q));  // nothing forwarded
+    device_free(d);
+}
+
 int main(void) {
     const struct CMUnitTest tests[] = {
             cmocka_unit_test(test_state_set_chunking),
             cmocka_unit_test(test_close_request_in_closed_acks),
+            cmocka_unit_test(test_ping_answered_with_pong),
+            cmocka_unit_test(test_publish_rejected_when_closed),
             cmocka_unit_test(test_silence_revalidate_pong),
             cmocka_unit_test(test_silence_escalates_to_replay),
             cmocka_unit_test(test_silence_disabled_with_keepalive),

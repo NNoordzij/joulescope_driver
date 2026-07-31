@@ -686,13 +686,14 @@ static void bulk_in_open(struct dev_s * d, struct jsdrvp_msg_s * msg) {
 
 static void bulk_in_close(struct dev_s * d, struct jsdrvp_msg_s * msg) {
     uint8_t ep = msg->extra.bkusb_stream.endpoint;
+    uint8_t pipe_id = ep | 0x80;  // bulk_in_open registers with the IN direction bit
     JSDRV_LOGI("bulk_in_close %d", (int) ep);
-    d->endpoint_mode[ep] = EP_MODE_OFF;
+    d->endpoint_mode[pipe_id] = EP_MODE_OFF;
     struct jsdrv_list_s * item;
     struct transfer_s * t;
     jsdrv_list_foreach_reverse(&d->transfers_pending, item) {
         t = JSDRV_CONTAINER_OF(item, struct transfer_s, item);
-        if (t->transfer->endpoint == ep) {
+        if (t->transfer->endpoint == pipe_id) {
             libusb_cancel_transfer(t->transfer);
         }
     }
@@ -1041,10 +1042,17 @@ static void device_close_all(struct backend_s * s) {
             device_close(d);
         }
     }
+    // bound the wait: a device that never goes idle (removed mid-transfer,
+    // wedged kernel driver) must not hang process exit forever.  WinUSB
+    // bounds its per-device thread joins at 10 seconds.
+    uint32_t t_start_ms = jsdrv_time_ms_u32();
     while (!are_all_devices_idle(s)) {
         libusb_handle_events_timeout_completed(s->ctx, &libusb_timeout_tv, NULL);
         handle_device_close(s);
-        // todo timeout?
+        if ((jsdrv_time_ms_u32() - t_start_ms) > 10000U) {
+            JSDRV_LOGE("device_close_all timed out; forcing close");
+            break;
+        }
     }
     for (uint32_t i = 0; i < DEVICES_MAX; ++i) {
         struct dev_s *d = &s->devices[i];

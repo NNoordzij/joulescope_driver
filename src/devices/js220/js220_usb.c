@@ -378,7 +378,7 @@ static struct jsdrvp_msg_s * ll_await(struct dev_s * d, msg_filter_fn filter_fn,
             .events = POLLIN,
             .revents = 0,
         };
-        poll(&fds, 1, 2);
+        poll(&fds, 1, (int) timeout_ms);
 #endif
         struct jsdrvp_msg_s * m = msg_queue_pop_immediate(d->ll.rsp_q);
         if (m) {
