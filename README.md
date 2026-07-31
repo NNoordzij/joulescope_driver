@@ -23,8 +23,9 @@ Welcome to the Joulescope™ Driver project.
 [Joulescope](https://www.joulescope.com) is an affordable, precision DC energy
 analyzer that enables you to build better products.
 
-This user-space C library communicates with Joulescope products to configure 
-operation and receive data.  The first-generation driver introduced in 2019 was
+This user-space C library communicates with Joulescope products to configure
+operation and receive data.  It supports the JS110, JS220, and JS320
+Joulescope models.  The first-generation driver introduced in 2019 was
 written in Python.  While Python proved to be a very flexible language enabling
 many user scripts, it was difficult to support other languages.  
 This second-generation driver launched in 2022 addresses several issues
@@ -47,7 +48,7 @@ For more information, see:
 
 ## Python Installation
 
-The python bindings work with Python 3.9 and later.
+The python bindings work with Python 3.12 and later.
 To use the python bindings, ensure that you have a compatible version
 of python installed on your host computer.  Then:
 
@@ -118,7 +119,7 @@ This package includes a command-line tool, jsdrv:
 
 ### Build python bindings
 
-Install a compatible version of Python 3.9 or later.  To install
+Install a compatible version of Python 3.12 or later.  To install
 the pyjoulescope_driver dependencies:
 
     cd {your/repos/joulescope_driver}

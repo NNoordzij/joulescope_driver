@@ -11,6 +11,9 @@ Table of Contents
     readme.md
     c_api
     py_api
+    js220_topics
+    js320_cal.md
+    js320_fwup.md
     changelog.md
 
 

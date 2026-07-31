@@ -1,6 +1,6 @@
 # tmap fix — copy on publish, drop reference counting
 
-**Status**: proposed
+**Status**: complete (shipped as d6c1b9e)
 **Date**: 2026-04-20
 
 ## Problem

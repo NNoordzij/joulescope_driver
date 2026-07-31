@@ -66,7 +66,7 @@ emulated device proposal in `emulated_device.md`.
       tmap grows without bound during long captures and
       `jsdrv_bufsig_info` performs an O(N) `jsdrv_tmap_copy` per data
       message.
-- [ ] P7.1 `test/test_invariant_tmap.c` — regression test for the tmap
+- [x] P7.1 `test/test_invariant_tmap.c` (deleted; tmap_test now covers expire/copy/search) — regression test for the tmap
       bounds fix (1acc3ed) is dead: not in CMake, wrong framework
       (check.h vs cmocka), includes nonexistent headers.  The fix has no
       automated coverage.
@@ -185,17 +185,15 @@ emulated device proposal in `emulated_device.md`.
 - [ ] P4.2 `.github/workflows/packaging.yml` build_node_js — `npm test`
       never run; `node_api/test/test_binding.js` misuses async
       `assert.doesNotThrow`.
-- [ ] P7.1 `test/CMakeLists.txt:48-50` `dbc_test` and
-      `example/CMakeLists.txt:80-83` `boot_info_test` built but no
-      `add_test` — never run by ctest.
+- [x] P7.1 `dbc_test` and `boot_info_test` now registered with ctest.
 
 ### Docs (Phase 7)
 
-- [ ] `README.md:50,121` — claims Python 3.9+; actual
+- [x] `README.md:50,121` — claims Python 3.9+; actual
       `python_requires ~=3.12`.  No mention of JS110/JS220/JS320.
-- [ ] `doc/js320_cal.md`, `doc/js320_fwup.md`, `doc/js220.txt` — thorough
+- [x] `doc/js320_cal.md`, `doc/js320_fwup.md`, `doc/js220.txt` — thorough
       docs orphaned from the sphinx toctree (`doc/sphinx/index.rst`).
-- [ ] `doc/sphinx/py_api.rst` — missing program, program_js320, TimeMap,
+- [x] `doc/sphinx/py_api.rst` — missing program, program_js320, TimeMap,
       MemClient, StdMsg, release, CLI reference; `TimeMap` not exported in
       `pyjoulescope_driver/__init__.py` `__all__`.
 - [ ] `doc/sphinx/conf.py:86` — breathe path hardcoded to `cmake-build`;

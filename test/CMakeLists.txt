@@ -48,6 +48,11 @@ ADD_CMOCKA_TEST(cstr_test)
 add_executable(dbc_test dbc_test.c)
 add_dependencies(dbc_test cmocka)
 target_link_libraries(dbc_test cmocka)
+add_test(dbc_test ${CMAKE_CURRENT_BINARY_DIR}/dbc_test)
+
+# built in example/, registered here (enable_testing scope);
+# the NAME/COMMAND form resolves the target to its executable path
+add_test(NAME boot_info_test COMMAND boot_info_test)
 
 ADD_CMOCKA_TEST(downsample_test)
 ADD_CMOCKA_TEST(downsample_sinc_test)

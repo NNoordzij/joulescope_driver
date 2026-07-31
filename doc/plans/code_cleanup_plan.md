@@ -8,10 +8,15 @@ sentinel protocol (LL_TERMINATED → DEVICE_REMOVE barriers) that replaces
 timeout-based teardown.  `msg_queue_finalize` now takes a context and
 properly frees heap payloads / decrements tmap refs.
 
-**Still open:** ISSUE 4 (POSIX list remove without lock), ISSUE 5
-(atomics for `do_exit`), ISSUE 7 (tmap reader protection and snapshot
-on publish), and the Part 2 items (pool high-water marks, reference
-counting).  ISSUE 6 was determined to be a false positive.
+**Update (2026-07-31):** ISSUE 7 was resolved by the copy-on-publish
+tmap design (`d6c1b9e`, see `completed/tmap_fix.md`):
+`jsdrv_tmap_copy()` snapshots for consumers and the
+`reader_enter/exit` API was removed.
+
+**Still open:** ISSUE 4 (POSIX list remove without lock,
+`src/backend/libusb/msg_queue.c`), ISSUE 5 (atomics for `do_exit`
+`volatile bool` uses), and the Part 2 items (pool high-water marks,
+reference counting).  ISSUE 6 was determined to be a false positive.
 
 ## Prompt
 
