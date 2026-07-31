@@ -1087,6 +1087,13 @@ static int32_t on_sampling_frequency(struct dev_s * d,  const struct jsdrv_union
     }
     stream_resume(d);
 
+    if (d->fs != v.value.u32) {
+        // the requested rate was coerced (sinc1 signal_n 2/3 forced to 4);
+        // republish so clients see the actual rate, not the request
+        JSDRV_LOGW("h/fs %lu coerced to %lu", v.value.u32, d->fs);
+        send_to_frontend(d, "h/fs", &jsdrv_union_u32_r(d->fs));
+    }
+
     return 0;
 }
 

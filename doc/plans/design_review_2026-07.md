@@ -134,8 +134,8 @@ emulated device proposal in `emulated_device.md`.
       constant-folded to 2 by the preceding header validation; never
       tracks on-instrument sinc1 downsampling (wrong charge/energy scale
       at reduced rates).  Investigate with P2.7.
-- [ ] `js220_usb.c:1064-1071` — `h/fs` silently coerced when
-      `signal_n == 2||3` with no return code or republish (JS320 rejects).
+- [x] `js220_usb.c:1064-1071` — `h/fs` silently coerced when
+      `signal_n == 2||3`; now logs and republishes the actual rate.
 
 ### Backends / platform (Phase 5)
 
