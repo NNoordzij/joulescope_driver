@@ -49,6 +49,7 @@ set(SUPPORT_SOURCES
         calibration_hash.c
         cstr.c
         downsample.c
+        downsample_sinc.c
         devices/js110/js110_cal.c
         devices/js220/js220_i128.c
         devices/js110/js110_sample_processor.c

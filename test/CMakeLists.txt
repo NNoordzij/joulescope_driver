@@ -50,6 +50,7 @@ add_dependencies(dbc_test cmocka)
 target_link_libraries(dbc_test cmocka)
 
 ADD_CMOCKA_TEST(downsample_test)
+ADD_CMOCKA_TEST(downsample_sinc_test)
 ADD_CMOCKA_TEST(error_code_test)
 ADD_CMOCKA_DEVICE_TEST(js110 js110_cal_test)
 ADD_CMOCKA_DEVICE_TEST(js220 js220_i128_test)

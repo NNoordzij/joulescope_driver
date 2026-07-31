@@ -131,6 +131,7 @@ extensions = [
                                      'src/cstr.c',
                                      'src/devices.c',
                                      'src/downsample.c',
+                                     'src/downsample_sinc.c',
                                      #'src/emu.c',
                                      #'src/emulated.c',
                                      'src/error_code.c',

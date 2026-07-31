@@ -360,6 +360,20 @@ void jsdrvp_mb_dev_open_complete(struct jsdrvp_mb_dev_s * dev);
  */
 void jsdrvp_mb_dev_host_replay(struct jsdrvp_mb_dev_s * dev, char prefix);
 
+/**
+ * @brief Restore the host's retained values under a subtopic to handle_cmd.
+ *
+ * Same mechanism as jsdrvp_mb_dev_host_replay() but scoped to an
+ * arbitrary subtopic below the device prefix (e.g. "s/dwnN"), for
+ * device-side registers whose values the driver tracks in handle_cmd.
+ * The re-delivered values also forward to the device through the
+ * driver's normal handle_cmd path, which must be idempotent.
+ *
+ * @param dev The mb_device handle.
+ * @param subtopic The subtopic below the device prefix.
+ */
+void jsdrvp_mb_dev_topic_replay(struct jsdrvp_mb_dev_s * dev, const char * subtopic);
+
 JSDRV_CPP_GUARD_END
 
 #endif  /* JSDRV_PRV_MB_DRV_H_ */

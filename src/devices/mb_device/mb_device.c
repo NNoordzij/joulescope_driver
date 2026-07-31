@@ -570,26 +570,34 @@ void jsdrvp_mb_dev_open_complete(struct jsdrvp_mb_dev_s * dev) {
     send_to_frontend(dev, JSDRV_MSG_OPEN "#", &jsdrv_union_i32(0));
 }
 
-void jsdrvp_mb_dev_host_replay(struct jsdrvp_mb_dev_s * dev, char prefix) {
-    if (!dev || !prefix) {
+void jsdrvp_mb_dev_topic_replay(struct jsdrvp_mb_dev_s * dev, const char * subtopic) {
+    if (!dev || !subtopic || !subtopic[0]) {
         return;
     }
-    // Re-deliver the host's retained values under {prefix} to handle_cmd
-    // by subscribing RETAIN then immediately unsubscribing.  Used for the
-    // host-side 'h' instance, whose topics (h/fp, h/fs, h/i_scale,
-    // h/v_scale) are owned by the device-specific driver's handle_cmd, not
-    // a device pubsub instance -- so this restores the driver's internal
-    // state from the host cache on open.  Safe for host-side topics: they
-    // are applied by handle_cmd, not pushed to the device.
-    char p[2] = {prefix, '\0'};
+    // Re-deliver the host's retained values under {subtopic} to
+    // handle_cmd by subscribing RETAIN then immediately unsubscribing.
     struct jsdrv_topic_s t;
     jsdrv_topic_set(&t, dev->ll.prefix);
-    jsdrv_topic_append(&t, p);
-    JSDRV_LOGI("host_replay '%c' (%s)", prefix, t.topic);
+    jsdrv_topic_append(&t, subtopic);
+    JSDRV_LOGI("topic_replay %s", t.topic);
     jsdrvp_device_subscribe(dev->context, dev->ll.prefix, t.topic,
                             JSDRV_SFLAG_RETAIN | JSDRV_SFLAG_PUB);
     jsdrvp_device_unsubscribe(dev->context, dev->ll.prefix, t.topic,
                               JSDRV_SFLAG_RETAIN | JSDRV_SFLAG_PUB);
+}
+
+void jsdrvp_mb_dev_host_replay(struct jsdrvp_mb_dev_s * dev, char prefix) {
+    if (!prefix) {
+        return;
+    }
+    // Used for the host-side 'h' instance, whose topics (h/fp, h/fs,
+    // h/i_scale, h/v_scale) are owned by the device-specific driver's
+    // handle_cmd, not a device pubsub instance -- so this restores the
+    // driver's internal state from the host cache on open.  Safe for
+    // host-side topics: they are applied by handle_cmd, not pushed to
+    // the device.
+    char p[2] = {prefix, '\0'};
+    jsdrvp_mb_dev_topic_replay(dev, p);
 }
 
 static void state_fetch_send_get_init(struct jsdrvp_mb_dev_s * self) {

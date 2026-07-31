@@ -4,6 +4,17 @@
 This file contains the list of changes made to the Joulescope driver.
 
 
+## 2.3.5
+
+2026 Jul 31
+
+* Fixed JS320 h/fs downsampling.
+  * Remove 2000000 default, which is unsupported.
+  * Added host-side downsampling for < 1 kHz: instrument decimates to
+    1 kHz, host applies a sincN filter matched to s/dwnN/mode.
+  * Track s/dwnN/mode; bypass now reports the true decimate_factor.
+
+
 ## 2.3.4
 
 2026 Jul 17

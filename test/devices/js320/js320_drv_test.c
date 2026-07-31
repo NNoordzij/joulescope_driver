@@ -219,6 +219,11 @@ void jsdrvp_mb_dev_host_replay(struct jsdrvp_mb_dev_s * dev, char prefix) {
     (void) prefix;
 }
 
+void jsdrvp_mb_dev_topic_replay(struct jsdrvp_mb_dev_s * dev, const char * subtopic) {
+    (void) dev;
+    (void) subtopic;
+}
+
 
 // --- Stubs for js320 sub-modules (jtag, fwup, stats) ---
 
@@ -721,26 +726,43 @@ static void push_dwnN_ack(struct js320_drv_s * self, uint64_t sample_id) {
     assert_true(handled);
 }
 
-static void test_fs_to_dwn_n_mapping(void ** state) {
+static void test_fs_to_decimation_mapping(void ** state) {
     (void) state;
     uint32_t n = 99U;
-    assert_int_equal(0, js320_fs_to_dwn_n(1000000U, &n));
+    uint32_t r = 99U;
+    assert_int_equal(0, js320_fs_to_decimation(1000000U, &n, &r));
     assert_int_equal(0U, n);
+    assert_int_equal(1U, r);
     // fs=500000 needs factor 2, which gateware forces to 4: reject to avoid
     // a silent rate mismatch.
-    assert_int_not_equal(0, js320_fs_to_dwn_n(500000U, &n));
-    assert_int_equal(0, js320_fs_to_dwn_n(250000U, &n));
+    assert_int_not_equal(0, js320_fs_to_decimation(500000U, &n, &r));
+    assert_int_equal(0, js320_fs_to_decimation(250000U, &n, &r));
     assert_int_equal(4U, n);
-    assert_int_equal(0, js320_fs_to_dwn_n(1000U, &n));
+    assert_int_equal(1U, r);
+    assert_int_equal(0, js320_fs_to_decimation(1000U, &n, &r));
     assert_int_equal(1000U, n);
+    assert_int_equal(1U, r);
+    // Below 1 kHz: instrument pinned to 1 kHz, residual factor on host.
+    assert_int_equal(0, js320_fs_to_decimation(500U, &n, &r));
+    assert_int_equal(1000U, n);
+    assert_int_equal(2U, r);
+    assert_int_equal(0, js320_fs_to_decimation(100U, &n, &r));
+    assert_int_equal(1000U, n);
+    assert_int_equal(10U, r);
+    assert_int_equal(0, js320_fs_to_decimation(1U, &n, &r));
+    assert_int_equal(1000U, n);
+    assert_int_equal(1000U, r);
+    // Sub-1 kHz rates that do not divide 1 kHz evenly are rejected.
+    assert_int_not_equal(0, js320_fs_to_decimation(3U, &n, &r));
+    assert_int_not_equal(0, js320_fs_to_decimation(300U, &n, &r));
     // fs=333333 doesn't divide 1 MHz evenly.
-    assert_int_not_equal(0, js320_fs_to_dwn_n(333333U, &n));
+    assert_int_not_equal(0, js320_fs_to_decimation(333333U, &n, &r));
     // Factor 2 & 3 rejected (gateware forces them to factor 4).
-    assert_int_not_equal(0, js320_fs_to_dwn_n(1000000U / 3U, &n));
+    assert_int_not_equal(0, js320_fs_to_decimation(1000000U / 3U, &n, &r));
     // fs > 1 MHz rejected.
-    assert_int_not_equal(0, js320_fs_to_dwn_n(2000000U, &n));
+    assert_int_not_equal(0, js320_fs_to_decimation(2000000U, &n, &r));
     // fs=0 rejected.
-    assert_int_not_equal(0, js320_fs_to_dwn_n(0U, &n));
+    assert_int_not_equal(0, js320_fs_to_decimation(0U, &n, &r));
 }
 
 static void test_hfs_unified_forwards_dwnN(void ** state) {
@@ -772,6 +794,172 @@ static void test_hfs_unified_rejects_invalid_rate(void ** state) {
     assert_int_not_equal(0, g_cap.return_codes[g_cap.return_code_count - 1].rc);
     // Not dropping.
     assert_false(self->signal_ack.dropping);
+}
+
+// --- Tests: sub-1 kHz h/fs host decimation ---
+
+static void test_hfs_sub1khz_configures_host_filters(void ** state) {
+    struct js320_drv_s * self = *state;
+    enable_signal_stream(self);
+    bool handled = self->drv.handle_cmd(&self->drv, NULL, "h/fs", &jsdrv_union_u32_r(100));
+    assert_true(handled);
+    assert_int_equal(0, g_cap.return_codes[g_cap.return_code_count - 1].rc);
+    assert_int_equal(100, self->fs);
+    assert_int_equal(10, self->signal_host_factor);
+    // The instrument is pinned to its 1 kHz floor.
+    const struct device_publish_s * p = find_publish("s/dwnN/N");
+    assert_non_null(p);
+    assert_int_equal(1000, p->value_u32);
+    // Device step 16*1000 native ticks; combined includes the host factor.
+    assert_int_equal(16000, js320_device_decimate(self, 5));
+    assert_int_equal(160000, js320_runtime_decimate(self, 5));
+    // Filters allocated for all of i/v/p with the default sinc1 mode.
+    for (uint8_t ch = 5U; ch <= 7U; ++ch) {
+        assert_non_null(self->ports[ch].host_filter);
+        assert_int_equal(10, jsdrv_downsample_sinc_decimate_factor(self->ports[ch].host_filter));
+        assert_int_equal(1, jsdrv_downsample_sinc_order(self->ports[ch].host_filter));
+    }
+    assert_true(self->signal_ack.dropping);
+}
+
+static void test_hfs_sub1khz_stream_decimates(void ** state) {
+    struct js320_drv_s * self = *state;
+    enable_signal_stream(self);
+    self->drv.handle_cmd(&self->drv, NULL, "h/fs", &jsdrv_union_u32_r(100));  // R=10
+    push_dwnN_ack(self, 160000ULL);
+    g_cap.backend_send_count = 0;
+
+    float samples[10];
+    for (uint32_t k = 0; k < 10; ++k) { samples[k] = 2.0f; }
+    // First frame at native id 160000: input tick 10, aligned (10 % 10 == 0).
+    // 10 device samples = one full host block -> exactly 1 output sample.
+    push_current_frame(self, 160000ULL, samples, 10);
+    assert_non_null(self->ports[5].msg_in);
+    struct jsdrv_stream_signal_s * sig =
+        (struct jsdrv_stream_signal_s *) self->ports[5].msg_in->payload.bin;
+    assert_int_equal(1, sig->element_count);
+    assert_int_equal(16000000, sig->sample_rate);
+    assert_int_equal(160000, sig->decimate_factor);
+    // Output stamped at the window start (the frame's first sample).
+    assert_int_equal(160000ULL, sig->sample_id);
+    const float * out = (const float *)
+        (self->ports[5].msg_in->payload.bin + JSDRV_STREAM_HEADER_SIZE);
+    assert_true(out[0] == 2.0f);
+
+    // Contiguous next frame: one more output, ids keep stepping by the
+    // combined factor (no discontinuity flush).
+    push_current_frame(self, 160000ULL + 10ULL * 16000ULL, samples, 10);
+    assert_int_equal(2, sig->element_count);
+    assert_int_equal(0, g_cap.backend_send_count);
+}
+
+static void test_hfs_sub1khz_gap_restarts_filter(void ** state) {
+    struct js320_drv_s * self = *state;
+    enable_signal_stream(self);
+    self->drv.handle_cmd(&self->drv, NULL, "h/fs", &jsdrv_union_u32_r(100));  // R=10
+    push_dwnN_ack(self, 160000ULL);
+    g_cap.backend_send_count = 0;
+
+    float samples[10];
+    for (uint32_t k = 0; k < 10; ++k) { samples[k] = 1.0f; }
+    push_current_frame(self, 160000ULL, samples, 10);
+    assert_non_null(self->ports[5].msg_in);
+
+    // Gap: jump ahead one extra frame.  The pending message flushes and
+    // the filter realigns on the new (aligned) stream.
+    push_current_frame(self, 160000ULL + 20ULL * 16000ULL, samples, 10);
+    assert_int_equal(1, g_cap.backend_send_count);
+    assert_non_null(self->ports[5].msg_in);
+    struct jsdrv_stream_signal_s * sig =
+        (struct jsdrv_stream_signal_s *) self->ports[5].msg_in->payload.bin;
+    assert_int_equal(1, sig->element_count);
+    assert_int_equal(160000ULL + 20ULL * 16000ULL, sig->sample_id);
+}
+
+static void test_hfs_sub1khz_mode_change_reallocates(void ** state) {
+    struct js320_drv_s * self = *state;
+    self->drv.handle_cmd(&self->drv, NULL, "h/fs", &jsdrv_union_u32_r(10));  // R=100
+    assert_non_null(self->ports[5].host_filter);
+    assert_int_equal(1, jsdrv_downsample_sinc_order(self->ports[5].host_filter));
+    assert_int_equal(10, self->fs);
+    // sinc3: filters reallocate with the new order, same factor.
+    self->drv.handle_cmd(&self->drv, NULL, "s/dwnN/mode", &jsdrv_union_u32_r(3));
+    assert_non_null(self->ports[6].host_filter);
+    assert_int_equal(3, jsdrv_downsample_sinc_order(self->ports[6].host_filter));
+    assert_int_equal(100, jsdrv_downsample_sinc_decimate_factor(self->ports[6].host_filter));
+    assert_int_equal(10, self->fs);
+    // Bypass: host decimation disabled along with the instrument's.
+    self->drv.handle_cmd(&self->drv, NULL, "s/dwnN/mode", &jsdrv_union_u32_r(0));
+    assert_null(self->ports[5].host_filter);
+    assert_int_equal(16, js320_runtime_decimate(self, 5));
+    assert_int_equal(1000000, self->fs);
+    // Leaving bypass restores the stored host factor at the new order.
+    self->drv.handle_cmd(&self->drv, NULL, "s/dwnN/mode", &jsdrv_union_u32_r(2));
+    assert_non_null(self->ports[7].host_filter);
+    assert_int_equal(2, jsdrv_downsample_sinc_order(self->ports[7].host_filter));
+    assert_int_equal(10, self->fs);
+    assert_int_equal(1600000, js320_runtime_decimate(self, 5));
+}
+
+static void test_dwnN_direct_write_clears_host_factor(void ** state) {
+    struct js320_drv_s * self = *state;
+    self->drv.handle_cmd(&self->drv, NULL, "h/fs", &jsdrv_union_u32_r(100));
+    assert_int_equal(10, self->signal_host_factor);
+    assert_non_null(self->ports[5].host_filter);
+    // Raw register write: passthrough semantics, host decimation off.
+    self->drv.handle_cmd(&self->drv, NULL, "s/dwnN/N", &jsdrv_union_u32_r(100));
+    assert_int_equal(1, self->signal_host_factor);
+    assert_null(self->ports[5].host_filter);
+    assert_int_equal(10000, self->fs);
+    assert_int_equal(1600, js320_runtime_decimate(self, 5));
+}
+
+// --- Tests: s/dwnN/mode tracking ---
+
+static void test_dwn_mode_tracked_and_forwarded(void ** state) {
+    struct js320_drv_s * self = *state;
+    enable_signal_stream(self);
+    assert_int_equal(1, self->signal_dwn_mode);  // default sinc1
+    bool handled = self->drv.handle_cmd(&self->drv, NULL, "s/dwnN/mode", &jsdrv_union_u32_r(3));
+    assert_true(handled);
+    assert_int_equal(3, self->signal_dwn_mode);
+    const struct device_publish_s * p = find_publish("s/dwnN/mode");
+    assert_non_null(p);
+    assert_int_equal(3, p->value_u32);
+    // The firmware acks mode changes like N changes: drop window armed.
+    assert_int_equal(1, self->signal_ack.acks_outstanding);
+    assert_true(self->signal_ack.dropping);
+    assert_int_equal(0, g_cap.return_codes[g_cap.return_code_count - 1].rc);
+    // The ack releases the outstanding count.
+    push_dwnN_ack(self, 500ULL);
+    assert_int_equal(0, self->signal_ack.acks_outstanding);
+}
+
+static void test_dwn_mode_invalid_rejected(void ** state) {
+    struct js320_drv_s * self = *state;
+    uint32_t before = count_publishes("s/dwnN/mode");
+    bool handled = self->drv.handle_cmd(&self->drv, NULL, "s/dwnN/mode", &jsdrv_union_u32_r(4));
+    assert_true(handled);
+    assert_int_equal(1, self->signal_dwn_mode);  // unchanged
+    assert_int_equal(before, count_publishes("s/dwnN/mode"));
+    assert_int_not_equal(0, g_cap.return_codes[g_cap.return_code_count - 1].rc);
+    assert_false(self->signal_ack.dropping);
+}
+
+static void test_dwn_mode_bypass_semantics(void ** state) {
+    struct js320_drv_s * self = *state;
+    // N=1000 with the default sinc1 mode: 1 kHz output.
+    self->drv.handle_cmd(&self->drv, NULL, "s/dwnN/N", &jsdrv_union_u32_r(1000));
+    assert_int_equal(16000, js320_runtime_decimate(self, 5));
+    assert_int_equal(1000, self->fs);
+    // Bypass: the device streams 1 Msps regardless of N.
+    self->drv.handle_cmd(&self->drv, NULL, "s/dwnN/mode", &jsdrv_union_u32_r(0));
+    assert_int_equal(16, js320_runtime_decimate(self, 5));
+    assert_int_equal(1000000, self->fs);
+    // Leaving bypass: N applies again.
+    self->drv.handle_cmd(&self->drv, NULL, "s/dwnN/mode", &jsdrv_union_u32_r(1));
+    assert_int_equal(16000, js320_runtime_decimate(self, 5));
+    assert_int_equal(1000, self->fs);
 }
 
 static void test_dwnN_drop_until_ack_single(void ** state) {
@@ -1078,9 +1266,17 @@ int main(void) {
         cmocka_unit_test_setup_teardown(test_dwnN_signal_passthrough_codes,  test_setup, test_teardown),
         cmocka_unit_test_setup_teardown(test_dwnN_gpi_mode_off,              test_setup, test_teardown),
         cmocka_unit_test_setup_teardown(test_dwnN_gpi_n_change,              test_setup, test_teardown),
-        cmocka_unit_test_setup_teardown(test_fs_to_dwn_n_mapping,            test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_fs_to_decimation_mapping,       test_setup, test_teardown),
         cmocka_unit_test_setup_teardown(test_hfs_unified_forwards_dwnN,      test_setup, test_teardown),
         cmocka_unit_test_setup_teardown(test_hfs_unified_rejects_invalid_rate, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_hfs_sub1khz_configures_host_filters, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_hfs_sub1khz_stream_decimates,   test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_hfs_sub1khz_gap_restarts_filter, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_hfs_sub1khz_mode_change_reallocates, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_dwnN_direct_write_clears_host_factor, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_dwn_mode_tracked_and_forwarded, test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_dwn_mode_invalid_rejected,      test_setup, test_teardown),
+        cmocka_unit_test_setup_teardown(test_dwn_mode_bypass_semantics,      test_setup, test_teardown),
         cmocka_unit_test_setup_teardown(test_dwnN_drop_until_ack_single,     test_setup, test_teardown),
         cmocka_unit_test_setup_teardown(test_dwnN_drop_until_ack_multiple,   test_setup, test_teardown),
         cmocka_unit_test_setup_teardown(test_dwnN_drop_does_not_affect_gpi,  test_setup, test_teardown),
