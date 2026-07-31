@@ -288,6 +288,11 @@ emulated device proposal in `emulated_device.md`.
   `mb_device_test_harness.md` (items 1 and 5 open).
 - `test/buffer_test.c:36` — `TIMEOUT_MS = 100000; // todo 100`; `:428`
   `// todo check range?`.
+- cmocka `assert_float_equal`/`assert_double_equal` treat NaN as equal
+  to anything (`float_compare` returns 1 when both comparisons are
+  false).  Tests that must exclude NaN need an explicit
+  `assert_false(isnan(x))` — this masked the JS110 NaN-suppression bug
+  for years.  Audit other float assertions.
 - `test/hw/test_open_state_js320.py` — manual-run only; not referenced by
   CI or docs.
 - Stale plan markers: `code_cleanup_plan.md` ISSUE 7 actually resolved by

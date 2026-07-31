@@ -63,6 +63,9 @@ static void generate(struct js110_sp_s * s, uint8_t current_range, uint8_t gap, 
             assert_true(isnan(sample.p));
             assert_int_equal(sample.current_range, JS110_I_RANGE_MISSING);
         } else if (k < (JS110_SUPPRESS_SAMPLES_MAX - 1 + 32)) {
+            // cmocka's assert_float_equal treats NaN as equal to anything;
+            // check isnan explicitly so stray NaN samples cannot hide
+            assert_false(isnan(sample.i));
             assert_float_equal((2000 + z * i_step + 100 * (current_range + 1)) * pow(10, -3 - current_range), sample.i, 1e-10);
             assert_float_equal((3000 + z * v_step - 100) * 0.0001, sample.v, 1e-10);
             assert_float_equal(sample.i * sample.v, sample.p, 1e-6);
@@ -70,6 +73,7 @@ static void generate(struct js110_sp_s * s, uint8_t current_range, uint8_t gap, 
         } else if (k < (JS110_SUPPRESS_SAMPLES_MAX - 1 + 32 + gap)) {
             cbk(user_data, z, sample);
         } else {
+            assert_false(isnan(sample.i));
             assert_float_equal((2000 + z * i_step + 100 * (current_range + 2)) * pow(10, -3 - current_range - 1), sample.i, 1e-10);
             assert_float_equal((3000 + z * v_step - 100) * 0.0001, sample.v, 1e-10);
             assert_int_equal(sample.current_range, current_range + 1);
@@ -100,6 +104,7 @@ static void test_nan_0_1_0(void ** state) {
     s._suppress_mode = JS110_SUPPRESS_MODE_NAN;
     s._suppress_samples_window = 1;
     s._suppress_matrix = NULL;
+    s._i_range_last = JS110_I_RANGE_MISSING;  // no suppression on the first sample
     generate(&s, 0, 1, expect_nan, NULL);
 }
 
@@ -108,12 +113,25 @@ static void test_nan_0_2_0(void ** state) {
     s._suppress_mode = JS110_SUPPRESS_MODE_NAN;
     s._suppress_samples_window = 2;
     s._suppress_matrix = NULL;
+    s._i_range_last = JS110_I_RANGE_MISSING;  // no suppression on the first sample
     generate(&s, 0, 2, expect_nan, NULL);
 }
 
 static void test_nan_0_n_0(void ** state) {
     SETUP()
     s._suppress_mode = JS110_SUPPRESS_MODE_NAN;
+    s._i_range_last = JS110_I_RANGE_MISSING;
+    generate(&s, 0, 3, expect_nan, NULL);
+}
+
+static void test_nan_window_3_post_2(void ** state) {
+    // exactly window samples NaN; the post samples used by mean/interp
+    // estimation must remain valid in NaN mode
+    SETUP()
+    s._suppress_mode = JS110_SUPPRESS_MODE_NAN;
+    s._suppress_samples_window = 3;
+    s._suppress_samples_post = 2;
+    s._suppress_matrix = NULL;
     s._i_range_last = JS110_I_RANGE_MISSING;
     generate(&s, 0, 3, expect_nan, NULL);
 }
@@ -207,6 +225,7 @@ int main(void) {
             cmocka_unit_test(test_nan_0_1_0),
             cmocka_unit_test(test_nan_0_2_0),
             cmocka_unit_test(test_nan_0_n_0),
+            cmocka_unit_test(test_nan_window_3_post_2),
             cmocka_unit_test(test_mean_1_3_1),
             cmocka_unit_test(test_mean_2_3_1),
             cmocka_unit_test(test_mean_1_3_2),

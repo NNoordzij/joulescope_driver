@@ -970,26 +970,44 @@ static void on_voltage_lsb_source(struct js110_dev_s * d, const struct jsdrv_uni
 }
 
 static void on_i_range_mode(struct js110_dev_s * d, const struct jsdrv_union_s * value) {
+    if (value->value.u8 > JS110_SUPPRESS_MODE_NAN) {
+        JSDRV_LOGW("s/i/range/mode %d invalid, ignored", (int) value->value.u8);
+        return;
+    }
     d->sample_processor._suppress_mode = value->value.u8;
 }
 
 static void on_i_range_pre(struct js110_dev_s * d, const struct jsdrv_union_s * value) {
     JSDRV_LOGI("on_i_range_pre %d", (int) value->value.u8);
+    if (value->value.u8 > JS110_SUPPRESS_PRE_MAX) {
+        JSDRV_LOGW("s/i/range/pre %d invalid, ignored", (int) value->value.u8);
+        return;
+    }
     d->sample_processor._suppress_samples_pre = value->value.u8;
 }
 
 static void on_i_range_win(struct js110_dev_s * d, const struct jsdrv_union_s * value) {
     JSDRV_LOGI("on_i_range_win %d", (int) value->value.u8);
-    js110_sp_suppress_win(&d->sample_processor, value->value.u8);
+    if (js110_sp_suppress_win(&d->sample_processor, value->value.u8)) {
+        JSDRV_LOGW("s/i/range/win %d invalid, ignored", (int) value->value.u8);
+    }
 }
 
 static void on_i_range_win_sz(struct js110_dev_s * d, const struct jsdrv_union_s * value) {
     JSDRV_LOGI("on_i_range_win_sz %d", (int) value->value.u8);
+    if (value->value.u8 > JS110_SUPPRESS_WINDOW_MAX) {
+        JSDRV_LOGW("s/i/range/win_sz %d invalid, ignored", (int) value->value.u8);
+        return;
+    }
     d->sample_processor._suppress_samples_window = value->value.u8;
 }
 
 static void on_i_range_post(struct js110_dev_s * d, const struct jsdrv_union_s * value) {
     JSDRV_LOGI("on_i_range_post %d", (int) value->value.u8);
+    if (value->value.u8 > JS110_SUPPRESS_POST_MAX) {
+        JSDRV_LOGW("s/i/range/post %d invalid, ignored", (int) value->value.u8);
+        return;
+    }
     d->sample_processor._suppress_samples_post = value->value.u8;
 }
 

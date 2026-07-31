@@ -21,9 +21,6 @@
 #include <math.h>
 
 #define _SUPPRESS_SAMPLES_MASK (JS110_SUPPRESS_SAMPLES_MAX - 1)
-#define SUPPRESS_WINDOW_MAX 12
-#define SUPPRESS_PRE_MAX 8
-#define SUPPRESS_POST_MAX 8
 
 
 static inline uint8_t ptr_incr(uint8_t idx) {
@@ -100,7 +97,6 @@ void js110_sp_reset(struct js110_sp_s * self) {
     self->sample_count = 0;
 
     self->_suppress_samples_remaining = 0;
-    self->_suppress_samples_counter = 0;
     self->_i_range_last = JS110_I_RANGE_OFF;
 
     self->_voltage_range = 0;
@@ -148,7 +144,6 @@ struct js110_sample_s js110_sp_process(struct js110_sp_s * self, uint32_t sample
         } else {
             suppress_window = self->_suppress_samples_window;
         }
-        self->_suppress_samples_counter = suppress_window;
         if (suppress_window) {
             if (0 == self->_suppress_samples_remaining) {
                 self->start = self->head;
@@ -157,18 +152,19 @@ struct js110_sample_s js110_sp_process(struct js110_sp_s * self, uint32_t sample
         }
     }
 
-    if ((self->_suppress_mode == JS110_SUPPRESS_MODE_NAN) && (self->_suppress_samples_counter)) {
+    // NaN the window samples; the trailing post samples stay valid
+    // (they are only inputs for the mean/interp estimates).
+    if ((self->_suppress_mode == JS110_SUPPRESS_MODE_NAN)
+            && (self->_suppress_samples_remaining > self->_suppress_samples_post)) {
         s.i = NAN;
         s.v = NAN;
         s.p = NAN;
-        --self->_suppress_samples_counter;
     }
 
     self->samples[self->head] = s;
     self->head = ptr_incr(self->head);
 
     if (self->_suppress_samples_remaining) {
-        ++self->_suppress_samples_counter;
         --self->_suppress_samples_remaining;
         if (0 == self->_suppress_samples_remaining) {
             if (self->_suppress_mode == JS110_SUPPRESS_MODE_MEAN) {
