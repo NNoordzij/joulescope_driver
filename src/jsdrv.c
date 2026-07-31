@@ -776,7 +776,6 @@ static JSDRV_THREAD_RETURN_TYPE frontend_thread(JSDRV_THREAD_ARG_TYPE lpParam) {
     BACKEND_INIT(c, jsdrv_unittest_backend_factory);
 #else
     BACKEND_INIT(c, jsdrv_usb_backend_factory);
-    // todo BACKEND_INIT(c, jsdrv_emulation_backend_factory);
 #endif
 
     while (!c->do_exit) {

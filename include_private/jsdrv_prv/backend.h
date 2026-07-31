@@ -65,8 +65,6 @@ int32_t jsdrv_usb_backend_factory(struct jsdrv_context_s * context, struct jsdrv
 
 int32_t jsdrv_unittest_backend_factory(struct jsdrv_context_s * context, struct jsdrvbk_s ** backend);
 
-int32_t jsdrv_emulation_backend_factory(struct jsdrv_context_s * context, struct jsdrvbk_s ** backend);
-
 JSDRV_CPP_GUARD_END
 
 #endif  /* JSDRV_PRV_BACKEND_H_ */

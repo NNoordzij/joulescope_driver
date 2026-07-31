@@ -74,8 +74,6 @@ set(SUPPORT_SOURCES
 set(SOURCES
         buffer.c
         devices.c
-        #emu.c
-        #emulated.c
         devices/js110/js110_usb.c
         devices/js220/js220_usb.c
         devices/js220/js220_params.c
