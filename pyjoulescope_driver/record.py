@@ -225,7 +225,10 @@ class Record:
         return self
 
     def close(self):
-        """Close the recording and release all resources."""
+        """Close the recording and release all resources.
+
+        Safe to call repeatedly and after a failed :meth:`open`.
+        """
         if self._wr is None:
             return
         try:

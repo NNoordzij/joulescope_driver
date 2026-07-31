@@ -179,5 +179,19 @@ class TestRecord(unittest.TestCase):
         r.close()  # previously raised AttributeError
 
 
+@unittest.skipIf(Reader is None, 'pyjls not available')
+class TestRecordClose(unittest.TestCase):
+
+    def test_close_without_open(self):
+        r = Record(FakeDriver(), 'u/js320/000001', signals=['current'])
+        r.close()  # must not raise
+
+    def test_close_after_failed_open(self):
+        r = Record(FakeDriver(), 'u/js320/000001', signals=['current'])
+        with self.assertRaises(Exception):
+            r.open('/nonexistent_dir_zzz/out.jls')
+        r.close()  # must not raise
+
+
 if __name__ == '__main__':
     unittest.main()
