@@ -216,11 +216,17 @@ static struct jsdrv_time_map_s * find_entry_by_sample_id(struct jsdrv_tmap_s * s
     } else if (sample_id >= e_end->offset_counter) {
         return e_end;
     }
-    // initialize with even time map spacing
+    // initialize with even time map spacing; entries occupy the ring [tail, head)
+    size_t sz = tmap_size(self);
     double offset = ((double) (sample_id - e_start->offset_counter)) /
         (double) (e_end->offset_counter - e_start->offset_counter);
-    size_t idx = (size_t) ((double) tmap_size(self) * offset);
-    while (1) {
+    size_t k = (size_t) ((double) sz * offset);
+    if (k >= sz) {
+        k = sz - 1;
+    }
+    size_t idx = (self->tail + k) % self->alloc_size;
+    // bound iterations: non-monotonic entries must not loop forever
+    for (size_t iter = 0; iter < sz; ++iter) {
         struct jsdrv_time_map_s * entry = &self->entry[idx];
         if (sample_id < entry->offset_counter) {
             idx = ptr_decr(idx, self->alloc_size);
@@ -233,6 +239,7 @@ static struct jsdrv_time_map_s * find_entry_by_sample_id(struct jsdrv_tmap_s * s
         }
         return entry;
     }
+    return e_end;
 }
 
 static struct jsdrv_time_map_s * find_entry_by_timestamp(struct jsdrv_tmap_s * self, int64_t timestamp) {
@@ -243,11 +250,17 @@ static struct jsdrv_time_map_s * find_entry_by_timestamp(struct jsdrv_tmap_s * s
     } else if (timestamp >= e_end->offset_time) {
         return e_end;
     }
-    // initialize with even time map spacing
+    // initialize with even time map spacing; entries occupy the ring [tail, head)
+    size_t sz = tmap_size(self);
     double offset = ((double) (timestamp - e_start->offset_time)) /
         (double) (e_end->offset_time - e_start->offset_time);
-    size_t idx = (size_t) ((double) tmap_size(self) * offset);
-    while (1) {
+    size_t k = (size_t) ((double) sz * offset);
+    if (k >= sz) {
+        k = sz - 1;
+    }
+    size_t idx = (self->tail + k) % self->alloc_size;
+    // bound iterations: non-monotonic entries must not loop forever
+    for (size_t iter = 0; iter < sz; ++iter) {
         struct jsdrv_time_map_s * entry = &self->entry[idx];
         if (timestamp < entry->offset_time) {
             idx = ptr_decr(idx, self->alloc_size);
@@ -260,6 +273,7 @@ static struct jsdrv_time_map_s * find_entry_by_timestamp(struct jsdrv_tmap_s * s
         }
         return entry;
     }
+    return e_end;
 }
 
 static int64_t entry_to_timestamp(struct jsdrv_time_map_s * entry, uint64_t sample_id) {

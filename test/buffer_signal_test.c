@@ -286,6 +286,49 @@ static void test_samples_u1_skip_fill(void **state) {
     jsdrv_bufsig_free(&b);
 }
 
+static void insert_samples_time_mapped(struct bufsig_s * b, uint64_t sample_id_start, uint32_t length) {
+    // like insert_samples, but with a per-message time map so each
+    // message adds a distinct tmap entry (no deduplication)
+    struct jsdrv_stream_signal_s s;
+    memset(&s, 0, sizeof(s));
+    s.sample_id = sample_id_start;
+    s.field_id = JSDRV_FIELD_CURRENT;
+    s.index = 7;
+    s.element_type = JSDRV_DATA_TYPE_FLOAT;
+    s.element_size_bits = 32;
+    s.element_count = length;
+    s.sample_rate = 1000000;
+    s.decimate_factor = 1;
+    s.time_map.offset_time = JSDRV_TIME_HOUR
+            + (int64_t) ((sample_id_start * (uint64_t) JSDRV_TIME_SECOND) / 1000000LLU);
+    s.time_map.counter_rate = s.sample_rate;
+    s.time_map.offset_counter = sample_id_start;
+    float * f32 = (float *) s.data;
+    for (uint32_t i = 0; i < s.element_count; ++i) {
+        f32[i] = 0.0f;
+    }
+    jsdrv_bufsig_recv_data(b, &s);
+}
+
+static void test_tmap_bounded_over_long_capture(void **state) {
+    // the ring buffer holds 1e6 samples; streaming 4e6 samples with a
+    // changing time map must not grow the tmap without bound
+    initialize();
+    uint32_t length = 1000;
+    uint64_t sample_id = 0;
+    for (; sample_id < 4000000LLU; sample_id += length) {
+        insert_samples_time_mapped(&b, sample_id, length);
+    }
+    struct jsdrv_buffer_info_s info;
+    memset(&info, 0, sizeof(info));
+    assert_true(jsdrv_bufsig_info(&b, &info));
+    // ~1000 entries cover the 1e6 sample buffer; without expiration this
+    // would be ~4000 and keep growing forever
+    assert_true(jsdrv_tmap_length(info.tmap) <= 1100);
+    jsdrv_tmap_free(info.tmap);
+    jsdrv_bufsig_free(&b);
+}
+
 static void test_samples_start_length(void **state) {
     initialize();
     insert_samples(&b, 1000, 1000);
@@ -741,6 +784,7 @@ int main(void) {
             cmocka_unit_test(test_samples_u1_unaligned_writes),
             cmocka_unit_test(test_samples_u4_unaligned_writes),
             cmocka_unit_test(test_samples_u1_skip_fill),
+            cmocka_unit_test(test_tmap_bounded_over_long_capture),
             cmocka_unit_test(test_samples_start_length),
             cmocka_unit_test(test_samples_start_end),
             cmocka_unit_test(test_samples_all),

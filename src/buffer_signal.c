@@ -421,6 +421,11 @@ void jsdrv_bufsig_recv_data(struct bufsig_s * self, struct jsdrv_stream_signal_s
         sample_id += k;
         summarize(self, head, k);
     }
+
+    // The ring buffer overwrites the oldest samples; expire time map
+    // entries that only describe overwritten data so the tmap stays
+    // bounded over arbitrarily long captures.
+    jsdrv_tmap_expire_by_sample_id(self->tmap, self->sample_id_head - self->level0_size);
 }
 
 static uint64_t level0_tail(struct bufsig_s * self) {
