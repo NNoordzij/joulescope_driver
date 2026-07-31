@@ -98,9 +98,11 @@ void jsdrvp_msg_free(struct jsdrv_context_s * context, struct jsdrvp_msg_s * msg
 }
 
 static uint32_t backend_send_count_;
+static char backend_last_topic_[JSDRV_TOPIC_LENGTH_MAX];
 
 void jsdrvp_backend_send(struct jsdrv_context_s * context, struct jsdrvp_msg_s * msg) {
     ++backend_send_count_;
+    jsdrv_cstr_copy(backend_last_topic_, msg->topic, sizeof(backend_last_topic_));
     jsdrvp_msg_free(context, msg);
 }
 
@@ -129,6 +131,7 @@ static struct jsdrvp_mb_dev_s * device_alloc(void) {
     d->keepalive_en = true;
     time_now_ = JSDRV_TIME_SECOND * 1000000;  // arbitrary nonzero epoch
     backend_send_count_ = 0;
+    backend_last_topic_[0] = 0;
     return d;
 }
 
@@ -421,9 +424,34 @@ static void test_silence_only_in_open(void ** state) {
     device_free(d);
 }
 
+// --- Test: a close request while already closed acks immediately ---
+
+static void test_close_request_in_closed_acks(void ** state) {
+    (void) state;
+    struct jsdrvp_mb_dev_s * d = device_alloc();
+    d->state = ST_CLOSED;
+
+    // Explicit close of a never-opened device: ack immediately so the
+    // caller's jsdrv_close() completes instead of timing out.
+    state_machine_process(d, EV_API_CLOSE_REQUEST);
+    assert_int_equal(ST_CLOSED, d->state);
+    assert_int_equal(1, backend_send_count_);
+    assert_string_equal("u/js320/test/" JSDRV_MSG_CLOSE "#", backend_last_topic_);
+
+    // Finalize path: no ack; the UL thread loop exits on
+    // finalize_pending && ST_CLOSED.
+    d->finalize_pending = true;
+    state_machine_process(d, EV_API_CLOSE_REQUEST);
+    assert_int_equal(ST_CLOSED, d->state);
+    assert_int_equal(1, backend_send_count_);
+
+    device_free(d);
+}
+
 int main(void) {
     const struct CMUnitTest tests[] = {
             cmocka_unit_test(test_state_set_chunking),
+            cmocka_unit_test(test_close_request_in_closed_acks),
             cmocka_unit_test(test_silence_revalidate_pong),
             cmocka_unit_test(test_silence_escalates_to_replay),
             cmocka_unit_test(test_silence_disabled_with_keepalive),

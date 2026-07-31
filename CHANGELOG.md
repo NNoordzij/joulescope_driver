@@ -14,6 +14,8 @@ This file contains the list of changes made to the Joulescope driver.
     1 kHz, host applies a sincN filter matched to s/dwnN/mode.
   * Track s/dwnN/mode; bypass now reports the true decimate_factor.
 * Fixed Minibitty adapter Tracy integration for trace.
+* Fixed mb_device to ack close requests while already closed, so
+  jsdrv_close() completes instead of timing out.
 
 
 ## 2.3.4

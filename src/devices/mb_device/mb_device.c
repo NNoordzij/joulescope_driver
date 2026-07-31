@@ -1385,6 +1385,16 @@ static bool on_ll_close_exit(struct jsdrvp_mb_dev_s * self, uint8_t event) {
     return true;
 }
 
+static bool on_closed_close_request(struct jsdrvp_mb_dev_s * self, uint8_t event) {
+    (void) event;
+    // Already closed: ack immediately so the caller's jsdrv_close()
+    // completes instead of blocking until timeout.
+    if (!self->finalize_pending) {
+        send_to_frontend(self, JSDRV_MSG_CLOSE "#", &jsdrv_union_i32(0));
+    }
+    return true;
+}
+
 #define TRANSITION_END {0, 0, NULL}
 
 const struct state_machine_transition_s state_machine_global[] = {
@@ -1394,6 +1404,8 @@ const struct state_machine_transition_s state_machine_global[] = {
 
 const struct state_machine_transition_s state_machine_closed[] = {
     {EV_API_OPEN_REQUEST, ST_LL_OPEN, NULL},
+    // ST_CLOSED has no on_enter/on_exit, so re-entry is a no-op.
+    {EV_API_CLOSE_REQUEST, ST_CLOSED, on_closed_close_request},
     TRANSITION_END
 };
 
