@@ -54,11 +54,11 @@ emulated device proposal in `emulated_device.md`.
       truncated to `uint8_t` (256 → 0) and unguarded `src->decimate == 0`;
       downstream `sample_freq / decimate_factor` divides by zero.
       `jsdrv_statistics_s.decimate_factor` (jsdrv.h:326) is too narrow.
-- [ ] P3.1 `pyjoulescope_driver/record.py:276` — only `fsr_f32` is ever
+- [x] P3.1 `pyjoulescope_driver/record.py:276` — only `fsr_f32` is ever
       called; `current_range` (u4) and `gpi[N]`/`trigger_in` (u1) signals
       advertised by the record CLI are written incorrectly.  pyjls `fsr`
       is required for integer types and never called.
-- [ ] P3.2 `pyjoulescope_driver/record.py:201-221` — multi-device open
+- [x] P3.2 `pyjoulescope_driver/record.py:201-221` — multi-device open
       loops devices × all signals: N× subscribe/publish, duplicate writes,
       N-1 subscription leak on close.
 - [x] P1.7 `src/tmap.c` + `src/buffer_signal.c:362` —
@@ -165,19 +165,19 @@ emulated device proposal in `emulated_device.md`.
 
 ### Python / Node / CI (Phases 3-4)
 
-- [ ] P3.3 `entry_points/statistics.py:72-94` — JS320 skipped though the
+- [x] P3.3 `entry_points/statistics.py:72-94` — JS320 skipped though the
       driver publishes JS320 statistics (`js320_drv.c:921`).
-- [ ] P3.3 `entry_points/measure.py:80-81` — returns tuple where callers
+- [x] P3.3 `entry_points/measure.py:80-81` — returns tuple where callers
       expect dict (TypeError); `:102-104` unguarded `data[0]/[-1]`;
       JS220-only topics with no device check (`:116-118`).
-- [ ] P3.3 `entry_points/info.py:92-108` — `len(...) is None` dead check;
+- [x] P3.3 `entry_points/info.py:92-108` — `len(...) is None` dead check;
       JS220-only version detail.  `entry_points/record.py:85-93` — prints
       "Unsupported device" for JS320 then records anyway.
-- [ ] P3.4 `pyjoulescope_driver/binding.pyx:1058` — 'defaults' docstring
+- [x] P3.4 `pyjoulescope_driver/binding.pyx:1058` — 'defaults' docstring
       contradicts the 2026-06 redefinition
       (open_state_management.md:61).  Open-mode naming drift:
       C `RESUME` / Python `'restore'` / Node doc `resume`.
-- [ ] P3.4 `program.py:89-98` — busy-spin loop without sleep; `:17-22`
+- [x] P3.4 `program.py:89-98` — busy-spin loop without sleep; `:17-22`
       docstring references removed `jsdrv_util` binary.
 - [ ] P4.1 `node_api/src/joulescope_driver.cc:274-289` —
       `buffer_info_to_js`, `buffer_rsp_to_js`, default `bin_to_js` all

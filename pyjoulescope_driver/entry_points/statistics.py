@@ -90,6 +90,11 @@ def on_cmd(args):
                 d.publish(device + '/s/stats/scnt', scnt)
                 d.publish(device + '/s/stats/ctrl', 1)
                 d.subscribe(device + '/s/stats/value', 'pub', _on_statistics_value)
+            elif 'js320' in device:
+                # JS320, on-instrument statistics (matches example/jsdrv/statistics.c)
+                d.publish(device + '/s/i/range/mode', 5)
+                d.publish(device + '/s/stats/ctrl', 1)
+                d.subscribe(device + '/s/stats/value', 'pub', _on_statistics_value)
             else:
                 print(f'Skip unsupported device {device}')
         try:

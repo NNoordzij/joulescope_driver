@@ -1060,8 +1060,11 @@ cdef class Driver:
 
         :param device_prefix: The prefix name for the device.
         :param mode: The open mode which is one of:
-            * 'defaults': Reconfigure the device for default operation.
-            * 'restore': Update our state with the current device state.
+            * 'defaults': Push state to the device: the host's retained
+              value for each writable topic when present, else the
+              metadata default.
+            * 'restore': Push nothing; adopt the device's current state
+              into the host cache.
             * 'raw': Open the device in raw mode for development or firmware update.
             * None: equivalent to 'defaults'.
         :param timeout: The timeout in seconds.  None uses the default timeout.

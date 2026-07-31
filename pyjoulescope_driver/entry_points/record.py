@@ -89,8 +89,7 @@ def on_cmd(args):
                     elif 'js220' in device_path:
                         d.publish(f'{device_path}/s/i/range/mode', 'auto')
                         d.publish(f'{device_path}/s/v/range/mode', 'auto')
-                    else:
-                        print(f'Unsupported device {device_path}')
+                    # other devices record with their existing range configuration
 
                 for set_cmd in args.set:
                     topic, value = set_cmd.split('=')

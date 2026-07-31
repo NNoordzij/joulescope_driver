@@ -89,7 +89,7 @@ _JOULESCOPE_INFORMATION = """
 def _list_devices(driver):
     txt = []
     device_paths = driver.device_paths()
-    if len(device_paths) is None:
+    if len(device_paths) == 0:
         txt.append('No connected Joulescopes found')
     else:
         for device_path in device_paths:
@@ -99,7 +99,7 @@ def _list_devices(driver):
                 txt.append(f'    {device_path}: could not open')
                 continue
             try:
-                if '/js220/' in device_path:
+                if ('/js220/' in device_path) or ('/js320/' in device_path):
                     fw = version_to_str(driver.query(f'{device_path}/c/fw/version'))
                     hw = version_to_str(driver.query(f'{device_path}/c/hw/version'))
                     fpga = version_to_str(driver.query(f'{device_path}/s/fpga/version'))

@@ -13,9 +13,6 @@
 # limitations under the License.
 
 from pyjoulescope_driver import Driver
-import queue
-import signal
-import time
 
 
 def parser_config(p):

@@ -78,7 +78,7 @@ def measure(driver, device, duration=None, on_progress=None):
     duration = 30 if duration is None else int(duration)
     data = []
     if duration <= 0:
-        return 0, 0
+        return {'energy': 0.0, 'charge': 0.0, 'duration': 0.0}
     total_count = 10 * duration + 1  # need one extra since use first as a baseline
 
     def _on_statistics_value(topic, value):
@@ -96,6 +96,8 @@ def measure(driver, device, duration=None, on_progress=None):
     finally:
         driver.unsubscribe(device + '/s/stats/value', _on_statistics_value)
 
+    if len(data) < 2:  # interrupted before enough statistics arrived
+        return {'energy': 0.0, 'charge': 0.0, 'duration': 0.0}
     if len(data) > total_count:
         data = data[:total_count]
     return {
@@ -112,9 +114,19 @@ def on_cmd(args):
             print('Found %d devices', len(devices))
             return 1
         device = devices[0]
+        model = device.split('/')[1]
+        if model not in ['js110', 'js220']:
+            print(f'Unsupported device {device}')
+            return 1
         d.open(device)
         d.publish(device + '/s/i/range/mode', 'auto')
-        d.publish(device + '/s/stats/scnt', 100_000)  # 10 Hz update rate
+        if model == 'js110':
+            # host-side statistics require the i/v/p sample streams
+            for topic in ['s/i/ctrl', 's/v/ctrl', 's/p/ctrl']:
+                d.publish(f'{device}/{topic}', 1)
+            d.publish(device + '/s/stats/scnt', 200_000)  # 10 Hz at 2 Msps
+        else:
+            d.publish(device + '/s/stats/scnt', 100_000)  # 10 Hz at 1 Msps
         d.publish(device + '/s/stats/ctrl', 1)
         data = measure(d, device, duration=args.duration, on_progress=args.no_progress)
         d.publish(device + '/s/stats/ctrl', 0)
@@ -131,6 +143,7 @@ def on_cmd(args):
         print(f"energy={data['energy']} J")
         print(f"charge={data['charge']} C")
         print(f"duration={data['duration']} s")
-        print(f"current_average={data['charge'] / data['duration']} A")
-        print(f"power_average={data['energy'] / data['duration']} W")
+        if data['duration'] > 0:
+            print(f"current_average={data['charge'] / data['duration']} A")
+            print(f"power_average={data['energy'] / data['duration']} W")
     return 0
