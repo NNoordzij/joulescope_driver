@@ -28,11 +28,11 @@ emulated device proposal in `emulated_device.md`.
 
 ## HIGH severity (crashes, aborts, wrong data)
 
-- [ ] P1.2 `src/buffer_signal.c:79-92` — `jsdrv_bufsig_alloc` hard-faults
+- [x] P1.2 `src/buffer_signal.c:79-92` — `jsdrv_bufsig_alloc` hard-faults
       (`JSDRV_ASSERT(false)` → process abort) for `JSDRV_DATA_TYPE_INT` and
       `UINT/8`, which JS320 publishes (`s/adc/N/!data` INT/32,
       `s/uart/!data` UINT/8, `js320_drv.c:107-124`).  No error return path.
-- [ ] P1.1 `src/log.c:65-77` — missing commas collapse the 11-entry level
+- [x] P1.1 `src/log.c:65-77` — missing commas collapse the 11-entry level
       name table to 9; `jsdrv_log_level_to_str()` returns NULL for
       DEBUG3/ALL and wrong names for NOTICE..DEBUG2.
 - [ ] P2.1 `src/devices/js220/js220_usb.c:1182-1194,1526-1527` — JS220
@@ -61,7 +61,7 @@ emulated device proposal in `emulated_device.md`.
 - [ ] P3.2 `pyjoulescope_driver/record.py:201-221` — multi-device open
       loops devices × all signals: N× subscribe/publish, duplicate writes,
       N-1 subscription leak on close.
-- [ ] P1.7 `src/tmap.c` + `src/buffer_signal.c:362` —
+- [x] P1.7 `src/tmap.c` + `src/buffer_signal.c:362` —
       `jsdrv_tmap_expire_by_sample_id()` implemented/tested/never called;
       tmap grows without bound during long captures and
       `jsdrv_bufsig_info` performs an O(N) `jsdrv_tmap_copy` per data
@@ -75,34 +75,37 @@ emulated device proposal in `emulated_device.md`.
 
 ### C core
 
-- [ ] P1.3 `src/buffer_signal.c:374-375` — u1/u4 write path byte-truncates
+- [x] P1.3 `src/buffer_signal.c:374-375` — u1/u4 write path byte-truncates
       the bit offset (read path at `:450-455` handles it); `:333-342`
       skip-fill wrap test mixes sample and byte units; `:113-131` free
       leaves stale `levels[]` metadata (`summary_get` keys off `k != 0`).
       Dead unreachable f64 NaN-fill branch at `:319-330`.
-- [ ] P1.4 `src/buffer.c` — `:388` `%s` applied to `u32_a` (crash on
+- [x] P1.4 `src/buffer.c` — `:388` `%s` applied to `u32_a` (crash on
       invalid buffer index); `:303-323` `req_s` leak on the two early-out
       paths of `req_handle_one`; `:728` finalize `<` vs `<=` leaves buffer
       id 16 alive (thread + cmd_q leak); `:471-476` `g/hold` documented
       1→0 clear (jsdrv_prv/buffer.h:51) not implemented.
-- [ ] P1.5 `src/union.c` — `:262-269` `jsdrv_union_value_to_str` writes
+- [x] P1.5 `src/union.c` — `:262-269` `jsdrv_union_value_to_str` writes
       nothing for F32/F64/NULL (uninitialized caller buffer in log paths);
       `:273,277` U64/I64 truncated to 32-bit; `:167-171`
       `jsdrv_union_as_type` F64→signed rejects all negatives (checks
       `v < 0` instead of type min); `:29-57` `jsdrv_union_eq` returns
       false for identical STDMSG/FRAME (pubsub dedup never fires).
-- [ ] P1.6 `src/json.c` — `:183-197` `parse_literal` never compares chars
+- [x] P1.6 `src/json.c` — `:183-197` `parse_literal` never compares chars
       (`"txyz"` parses as `true`); `:201-233` integers i32-only with
       silent wrap though metadata documents u64/i64; no recursion depth
       limit (untrusted device metadata path).  `src/meta.c:283` —
       `s->range[s->array_idx++]` unbounded vs `range[3]`: overflow on
       malformed metadata.
-- [ ] P1.8 `src/jsdrv.c:462-467,482-487` — device-not-found logs an error
+- [x] P1.8 `src/jsdrv.c:462-467,482-487` — device-not-found logs an error
       then continues with `dev == NULL` → NULL deref in
-      `device_subscriber`; missing returns.  `:549` `// todo` — factory
-      failure publishes nothing; device silently never appears.
-- [ ] `src/tmap.c:211-263` — `while (1)` searches with no iteration bound
-      (part of P1.7).
+      `device_subscriber`; missing returns.  Also fixed: factory-failure
+      path freed the device while still linked into `c->devices`.
+      Remaining (moved to Phase 6): factory failure publishes nothing;
+      the device silently never appears in `@/list`.  Needs a frontend
+      diagnostic topic decision (e.g. `@/!error`).
+- [x] `src/tmap.c:211-263` — `while (1)` searches with no iteration bound
+      (part of P1.7).  Also fixed tail-relative ring indexing.
 
 ### Device drivers
 
