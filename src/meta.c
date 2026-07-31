@@ -280,6 +280,9 @@ static int32_t on_value(void * user_data, const struct jsdrv_union_s * token) {
                     s->state = VALUE_ST_SEARCH;
                 }
             } else if (s->state == VALUE_ST_RANGE_VAL) {
+                if (s->array_idx >= 3) {  // [v_min, v_max] or [v_min, v_max, v_step]
+                    return JSDRV_ERROR_PARAMETER_INVALID;
+                }
                 s->range[s->array_idx++].u64 = token->value.u64;
             } else if (s->state == VALUE_ST_OPTIONS_VAL) {
                 if (0 == s->array_idx++) {

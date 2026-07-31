@@ -50,6 +50,7 @@ static int32_t on_token(void * user_data, const struct jsdrv_union_s * token) {
             break;
         }
         case JSDRV_UNION_I32: check_expected_value(token->value.i32); break;
+        case JSDRV_UNION_I64: check_expected_value(token->value.i64); break;
         case JSDRV_UNION_F64: check_expected_value(token->value.u64); break;  // check binary representation
         default:
             assert_true(false);
@@ -70,6 +71,7 @@ static int32_t on_token(void * user_data, const struct jsdrv_union_s * token) {
             break;                                                                                  \
         }                                                                                           \
         case JSDRV_UNION_I32:  expect_value(on_token, value, token_->value.i32); break;             \
+        case JSDRV_UNION_I64:  expect_value(on_token, value, token_->value.i64); break;             \
         case JSDRV_UNION_F64:  expect_value(on_token, value, token_->value.u64); break;             \
         default: assert_true(false); break;                                                         \
     }                                                                                               \
@@ -116,6 +118,39 @@ static void test_value_literals(void **state) {
     assert_int_equal(0, jsdrv_json_parse("   true   ", on_token, *state));
 
     assert_int_equal(JSDRV_ERROR_SYNTAX_ERROR, jsdrv_json_parse("goober", on_token, *state));
+}
+
+static void test_value_literals_invalid(void **state) {
+    // parse_literal previously never compared characters
+    assert_int_equal(JSDRV_ERROR_SYNTAX_ERROR, jsdrv_json_parse("txyz", on_token, *state));
+    assert_int_equal(JSDRV_ERROR_SYNTAX_ERROR, jsdrv_json_parse("fzzzz", on_token, *state));
+    assert_int_equal(JSDRV_ERROR_SYNTAX_ERROR, jsdrv_json_parse("nope", on_token, *state));
+    assert_int_equal(JSDRV_ERROR_SYNTAX_ERROR, jsdrv_json_parse("Nxx", on_token, *state));
+    assert_int_equal(JSDRV_ERROR_SYNTAX_ERROR, jsdrv_json_parse("tru", on_token, *state));
+}
+
+static void test_value_i64(void **state) {
+    // values beyond i32 previously wrapped silently
+    expect_tk(&jsdrv_union_i64(5000000000LL));
+    assert_int_equal(0, jsdrv_json_parse("5000000000", on_token, *state));
+    expect_tk(&jsdrv_union_i64(-5000000000LL));
+    assert_int_equal(0, jsdrv_json_parse("-5000000000", on_token, *state));
+    expect_tk(&jsdrv_union_i64(INT64_MAX));
+    assert_int_equal(0, jsdrv_json_parse("9223372036854775807", on_token, *state));
+    // beyond i64 must error, not wrap
+    assert_int_equal(JSDRV_ERROR_SYNTAX_ERROR, jsdrv_json_parse("9223372036854775808", on_token, *state));
+    assert_int_equal(JSDRV_ERROR_SYNTAX_ERROR, jsdrv_json_parse("99999999999999999999", on_token, *state));
+}
+
+static void test_nesting_too_deep(void **state) {
+    char json[256];
+    size_t i = 0;
+    for (; i < 100; ++i) {
+        json[i] = '[';
+    }
+    json[i] = 0;
+    assert_int_equal(JSDRV_ERROR_SYNTAX_ERROR, jsdrv_json_parse(json, NULL, *state));
+    (void) state;
 }
 
 static void test_obj_empty(void **state) {
@@ -221,6 +256,9 @@ int main(void) {
             cmocka_unit_test(test_value_string),
             cmocka_unit_test(test_value_i32),
             cmocka_unit_test(test_value_literals),
+            cmocka_unit_test(test_value_literals_invalid),
+            cmocka_unit_test(test_value_i64),
+            cmocka_unit_test(test_nesting_too_deep),
             cmocka_unit_test(test_obj_empty),
             cmocka_unit_test(test_obj_1),
             cmocka_unit_test(test_obj_N),
