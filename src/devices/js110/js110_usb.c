@@ -387,7 +387,7 @@ static const struct param_s PARAMS[] = {
             "\"dtype\": \"u32\","
             "\"brief\": \"Number of 2 Msps samples per block.\","
             "\"default\": 1000000,"
-            "\"range\": [0, 2000000]"
+            "\"range\": [1, 2000000]"
         "}",
         on_stats_scnt,
     },
@@ -1084,6 +1084,10 @@ static void on_gpi_1_ctrl(struct js110_dev_s * d, const struct jsdrv_union_s * v
 static void on_stats_scnt(struct js110_dev_s * d, const struct jsdrv_union_s * value) {
     struct jsdrv_union_s v = *value;
     jsdrv_union_as_type(&v, JSDRV_UNION_U32);
+    if (0 == v.value.u32) {  // would silently stop statistics forever
+        JSDRV_LOGW("s/stats/scnt 0 invalid, ignored");
+        return;
+    }
     js110_stats_sample_count_set(&d->stats, v.value.u32);
 }
 
