@@ -332,6 +332,7 @@ static bool req_handle_one(struct buffer_s * self) {
     struct req_s * req = JSDRV_CONTAINER_OF(item, struct req_s, item);
     struct bufsig_s * b = &self->signals[req->signal_id];
     if (!b->active) {
+        jsdrv_list_add_tail(&self->req_free, item);
         return false;
     }
     struct jsdrvp_msg_s * msg = jsdrvp_msg_alloc_data(self->context, req->req.rsp_topic);
@@ -341,8 +342,8 @@ static bool req_handle_one(struct buffer_s * self) {
     } else {
         msg->value.app = JSDRV_PAYLOAD_TYPE_BUFFER_RSP;
         jsdrvp_backend_send(self->context, msg);
-        jsdrv_list_add_tail(&self->req_free, item);
     }
+    jsdrv_list_add_tail(&self->req_free, item);
     return true;
 }
 
@@ -409,7 +410,7 @@ static bool handle_cmd_q(struct buffer_s * self) {
             }
         }
     } else if (msg->u32_a != 0) {
-        JSDRV_LOGW("Invalid buffer index: %s", msg->u32_a);
+        JSDRV_LOGW("Invalid buffer index: %" PRIu32, msg->u32_a);
         rc = JSDRV_ERROR_NOT_FOUND;
     } else if ((s[0] == 'a') && (s[1] == '/')) {
         s += 2;
@@ -495,8 +496,13 @@ static bool handle_cmd_q(struct buffer_s * self) {
         } else if (0 == strcmp(s, "hold")) {
             bool bool_v = false;
             jsdrv_union_to_bool(&msg->value, &bool_v);
+            uint8_t hold_prev = self->hold;
             self->hold = bool_v ? 1 : 0;
             JSDRV_LOGI("hold %s", self->hold ? "on" : "off");
+            if (hold_prev && !self->hold) {
+                // documented behavior: clear on hold 1 -> 0
+                buffer_free(self);
+            }
             rc = 0;
         } else if (0 == strcmp(s, "!clear")) {
             JSDRV_LOGI("clear");
@@ -749,7 +755,7 @@ void jsdrv_buffer_finalize(void) {
         unsubscribe(self->context, JSDRV_BUFFER_MGR_MSG_ACTION_REMOVE, JSDRV_SFLAG_PUB, _buffer_remove, NULL);
 
         // finalize all buffers
-        for (uint32_t buffer_idx = 1; buffer_idx < JSDRV_BUFFER_COUNT_MAX; ++buffer_idx) {
+        for (uint32_t buffer_idx = 1; buffer_idx <= JSDRV_BUFFER_COUNT_MAX; ++buffer_idx) {
             if (NULL != self->buffers[buffer_idx - 1].cmd_q) {
                 _buffer_remove_inner(self, buffer_idx);
             }
