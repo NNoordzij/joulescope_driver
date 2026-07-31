@@ -13,6 +13,7 @@ This file contains the list of changes made to the Joulescope driver.
   * Added host-side downsampling for < 1 kHz: instrument decimates to
     1 kHz, host applies a sincN filter matched to s/dwnN/mode.
   * Track s/dwnN/mode; bypass now reports the true decimate_factor.
+* Fixed Minibitty adapter Tracy integration for trace.
 
 
 ## 2.3.4

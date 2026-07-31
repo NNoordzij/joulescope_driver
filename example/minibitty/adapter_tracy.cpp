@@ -19,6 +19,7 @@
 
 #include "adapter_tracy.h"
 #include "adapter.h"
+#include "mbgen.h"
 //#include "tracy/tracy/TracyC.h"
 //#include "tracy/client/TracyProfiler.hpp"
 //#include "tracy/common/TracyColor.hpp"
@@ -73,10 +74,18 @@ namespace tracy
 static_assert(ProtocolVersion == 76, "Tracy wire protocol changed - re-audit adapter_tracy.cpp");
 static_assert(sizeof(WelcomeMessage) == 1170, "Tracy WelcomeMessage layout changed - re-audit adapter_tracy.cpp");
 
+// zone/message colors as 0xRRGGBB, serialized as b, g, r bytes on the wire
+#define COLOR_TASK          (0x2E7DD1)  // blue
+#define COLOR_ISR           (0xD97A29)  // orange
+#define COLOR_MSG_ERROR     (0xE05252)  // red: emergency .. error
+#define COLOR_MSG_WARNING   (0xE8B84B)  // amber: warning
+#define COLOR_MSG_INFO      (0x8BC34A)  // green: notice, info
+#define COLOR_MSG_DEBUG     (0x9E9E9E)  // gray: debug1 .. debug3
+
 class Profiler {
 
 public:
-    Profiler(jsdrv_context_s * context);
+    Profiler(jsdrv_context_s * context, const struct mbgen_s * mbgen, bool verbose_name);
     ~Profiler();
     void StartWorker();
     void on_trace(const struct jsdrv_union_s * value);
@@ -200,6 +209,13 @@ private:
     }
 
     void buf_source_location(uint64_t srcloc) {
+        uint32_t obj_class = (uint32_t) (srcloc >> 32);
+        uint32_t color = 0x000000;
+        if (obj_class == 1) {
+            color = COLOR_TASK;
+        } else if (obj_class == 2) {
+            color = COLOR_ISR;
+        }
         buf_header(QueueType::SourceLocation);
         // The srcloc encodes the object class and id, so use it directly as
         // the name/function string pointers; ServerQueryString decodes it.
@@ -207,7 +223,34 @@ private:
         buf_u64(srcloc);  // function
         buf_u64(3);       // file
         buf_u32(srcloc & 0xffff); // line
-        buf_color(0x000000);
+        buf_color(color);
+    }
+
+    void buf_log_message(int64_t time, uint32_t level, uint32_t file_id, uint32_t line,
+                         const uint32_t * args, uint32_t arg_count) {
+        char text[256];
+        mbgen_log_line(m_mbgen, text, sizeof(text), level, file_id, line, args, arg_count);
+        size_t sz = strlen(text);
+        uint32_t color;
+        if (level <= 3) {           // emergency .. error
+            color = COLOR_MSG_ERROR;
+        } else if (level == 4) {    // warning
+            color = COLOR_MSG_WARNING;
+        } else if (level <= 6) {    // notice, info
+            color = COLOR_MSG_INFO;
+        } else {                    // debug
+            color = COLOR_MSG_DEBUG;
+        }
+        // SingleStringData must immediately precede the message item;
+        // the server pairs them when processing MessageColor.
+        buf_header(QueueType::SingleStringData);
+        buf_u16((uint16_t) sz);
+        buf_ptr(text, (uint32_t) sz);
+        buf_header(QueueType::MessageColor);
+        buf_u64((uint64_t) time);  // absolute time, not reftime
+        buf_u8(color & 0xff);          // b
+        buf_u8((color >> 8) & 0xff);   // g
+        buf_u8((color >> 16) & 0xff);  // r
     }
 
     bool SendData() {
@@ -232,6 +275,8 @@ private:
     LZ4_stream_t * m_stream;
     msg_queue_s * m_queue;
     jsdrv_context_s * m_context;
+    const struct mbgen_s * m_mbgen;
+    bool m_verbose_name;
     uint8_t m_buf[TargetFrameSize * 3];     // total buffer size
     uint8_t * m_buf_start;  // current buffer block start, need to preserve 64 kB for LZ4_compress_fast_continue
     uint8_t * m_buf_ptr;    // current buffer insertion location
@@ -252,7 +297,7 @@ private:
     uint32_t m_zone_depth;
 };
 
-Profiler::Profiler(jsdrv_context_s * context)
+Profiler::Profiler(jsdrv_context_s * context, const struct mbgen_s * mbgen, bool verbose_name)
     : m_epoch( std::chrono::duration_cast<std::chrono::seconds>( std::chrono::system_clock::now().time_since_epoch() ).count() )
     , m_sock( nullptr )
     , m_broadcast( nullptr )
@@ -260,6 +305,8 @@ Profiler::Profiler(jsdrv_context_s * context)
     , m_stream(LZ4_createStream())
     , m_queue(msg_queue_init())
     , m_context(context)
+    , m_mbgen(mbgen)
+    , m_verbose_name(verbose_name)
     , m_time()
     , m_counter_prev(0)
     , m_reftime(0)
@@ -606,8 +653,10 @@ void Profiler::ProcessTraceMessage(jsdrvp_msg_s * msg) {
             case MB_TRACE_TYPE_FAULT: break;
             case MB_TRACE_TYPE_VALUE: break;
             case MB_TRACE_TYPE_LOG:
-                //printf(COUNTER_FMT "LOG @ %d.%d\n", counter, file_id, line);
-                    break;
+                if ((nullptr != m_mbgen) && (length >= 1)) {
+                    buf_log_message(m_time.time, metadata, file_id, line, &p32[1], length - 1);
+                }
+                break;
             case MB_TRACE_TYPE_RSV13: break;
             case MB_TRACE_TYPE_RSV14: break;
             case MB_TRACE_TYPE_OVERFLOW:
@@ -630,13 +679,26 @@ bool Profiler::HandleServerQuery() {
 
     switch( payload.type ) {
         case ServerQueryString: {
-            char name[32];
+            char name[96];
             uint32_t obj_class = (uint32_t) (payload.ptr >> 32);
             uint32_t obj_id = (uint32_t) (payload.ptr & 0xffffffff);
+            const char * mb_name = nullptr;
+            const char * cls = nullptr;
             if (obj_class == 1) {
-                snprintf(name, sizeof(name), "task.%u", obj_id);
+                cls = "task";
+                mb_name = mbgen_task_name(m_mbgen, obj_id);
             } else if (obj_class == 2) {
-                snprintf(name, sizeof(name), "isr.%u", obj_id);
+                cls = "isr";
+                mb_name = mbgen_isr_name(m_mbgen, obj_id);
+            }
+            if (nullptr != mb_name) {
+                if (m_verbose_name) {
+                    snprintf(name, sizeof(name), "%s (%s.%u)", mb_name, cls, obj_id);
+                } else {
+                    snprintf(name, sizeof(name), "%s", mb_name);
+                }
+            } else if (nullptr != cls) {
+                snprintf(name, sizeof(name), "%s.%u", cls, obj_id);
             } else if (payload.ptr == 3) {
                 snprintf(name, sizeof(name), "minibitty");
             } else {
@@ -688,8 +750,10 @@ void adapter_tracy_on_trace(void * user_data, const char * topic, const struct j
     self->on_trace(value);
 }
 
-void * adapter_tracy_initialize(struct jsdrv_context_s * context) {
-    auto * profiler = new tracy::Profiler(context);
+void * adapter_tracy_initialize(struct jsdrv_context_s * context,
+                                const struct mbgen_s * mbgen,
+                                int verbose_name) {
+    auto * profiler = new tracy::Profiler(context, mbgen, 0 != verbose_name);
     profiler->StartWorker();
     return profiler;
 }

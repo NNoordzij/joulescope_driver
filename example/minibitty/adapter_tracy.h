@@ -28,7 +28,21 @@
 
 MB_CPP_GUARD_START
 
-void * adapter_tracy_initialize(struct jsdrv_context_s * context);
+struct mbgen_s;
+
+/**
+ * @brief Initialize the Tracy forwarding client.
+ *
+ * @param context The jsdrv context.
+ * @param mbgen The optional loaded mbgen.bin metadata for name resolution.
+ *      NULL uses raw "task.N" / "isr.N" names.  Caller retains ownership
+ *      and must keep it valid until adapter_tracy_finalize().
+ * @param verbose_name When true, display "usbd (task.2)" instead of "usbd".
+ * @return The instance for adapter_tracy_on_trace() and adapter_tracy_finalize().
+ */
+void * adapter_tracy_initialize(struct jsdrv_context_s * context,
+                                const struct mbgen_s * mbgen,
+                                int verbose_name);
 void adapter_tracy_finalize(void * self);
 void adapter_tracy_on_trace(void * user_data, const char * topic, const struct jsdrv_union_s * value);
 
