@@ -157,10 +157,12 @@ int on_power_cycle(struct app_s * self, int argc, char * argv[]) {
     ROE(jsdrv_subscribe(self->context, JSDRV_MSG_DEVICE_REMOVE,
                         JSDRV_SFLAG_PUB, on_device_remove, self, 0));
 
-    // Open power device
+    // Open power device.  Use the full open timeout: a JS220 recovering
+    // from an abnormal teardown can need more than the 1 s default, and
+    // a power-open failure here makes DUT recovery impossible.
     rc = jsdrv_open(self->context, power_topic.topic,
                     JSDRV_DEVICE_OPEN_MODE_RESUME,
-                    JSDRV_TIMEOUT_MS_DEFAULT);
+                    open_timeout_ms_);
     if (rc) {
         printf("  ERROR: power device open failed: %d\n", rc);
         return rc;

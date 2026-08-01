@@ -196,9 +196,11 @@ int on_force_remove(struct app_s * self, int argc, char * argv[]) {
     ROE(jsdrv_subscribe(self->context, JSDRV_MSG_DEVICE_REMOVE,
                         JSDRV_SFLAG_PUB, on_device_remove, self, 0));
 
+    // Full open timeout: a JS220 recovering from an abnormal teardown
+    // can need more than the 1 s default (see power_cycle.c).
     rc = jsdrv_open(self->context, power_topic.topic,
                     JSDRV_DEVICE_OPEN_MODE_RESUME,
-                    JSDRV_TIMEOUT_MS_DEFAULT);
+                    open_timeout_ms_);
     if (rc) {
         printf("  ERROR: power device open failed: %d\n", rc);
         return rc;
