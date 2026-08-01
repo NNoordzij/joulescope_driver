@@ -81,6 +81,11 @@ ADD_CMOCKA_TEST(version_test)
 
 ADD_CMOCKA_TEST(os_test)
 
+add_executable(msg_queue_test msg_queue_test.c)
+add_dependencies(msg_queue_test jsdrv_support_objlib tinyprintf cmocka)
+target_link_libraries(msg_queue_test jsdrv_support_objlib tinyprintf cmocka)
+add_test(msg_queue_test ${CMAKE_CURRENT_BINARY_DIR}/msg_queue_test)
+
 add_executable(pubsub_test pubsub_test.c)
 add_dependencies(pubsub_test jsdrv_support_objlib tinyprintf cmocka)
 target_link_libraries(pubsub_test jsdrv_support_objlib tinyprintf cmocka)

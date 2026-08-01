@@ -6,7 +6,7 @@ This file contains the list of changes made to the Joulescope driver.
 
 ## 2.4.0
 
-2026 Jul 31
+2026 Aug 1
 
 * Performed a full design review focused on incomplete and partially
   complete features; findings and remaining work are tracked in
@@ -72,6 +72,14 @@ This file contains the list of changes made to the Joulescope driver.
   * Fixed libusb bulk_in_close endpoint id mismatch (latent).
   * POSIX driver threads now sleep for the scheduled timeout instead of
     busy-polling every 2 ms.
+  * Fixed POSIX msg_queue_pop_immediate, which reset the wakeup event
+    while later messages remained queued.  A burst of two or more
+    responses stranded the tail until the next push or timeout; once
+    the 2 ms busy-poll no longer masked it, this caused ~1 s stalls,
+    JS220 open timeouts, and close() returning JSDRV_ERROR_TIMED_OUT
+    after fire-and-forget publishes (issue #13's remaining symptom).
+    Now matches the WinUSB queue: reset only when the queue empties.
+    Added msg_queue_test.
   * mb_device now answers device-initiated link PINGs with PONG and
     rejects device publishes with JSDRV_ERROR_CLOSED while not open.
 * Fixed pyjoulescope_driver issues.
@@ -95,6 +103,12 @@ This file contains the list of changes made to the Joulescope driver.
   doc/plans/emulated_device.md.
 * Registered dbc_test and boot_info_test with ctest; removed the dead
   test_invariant_tmap.c.
+* Fixed pytest suite errors.
+  * Updated embed_js320_firmware tests to the released list-format
+    index.json (the tool moved to it in 2.0.7); the tool now reports
+    the friendly error for an empty index instead of IndexError.
+  * Excluded the standalone test/hw scripts from pytest collection;
+    run them directly with JSDRV_HW_DEVICE set.
 * Fixed README Python requirement (3.12+) and published the JS220 topic
   reference and JS320 calibration/firmware-update docs on the docs site.
 
