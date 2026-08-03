@@ -153,6 +153,15 @@ jsdrv_os_event_t jsdrv_os_event_alloc(void) {
     ev->events = POLLIN;
     ev->fd_signal = pipefd[1];
     fcntl(ev->fd_poll, F_SETFL, O_NONBLOCK);
+    // The signal end must never block the producer.  Sustained streaming
+    // can accumulate one byte per msg_queue_push between queue-empty
+    // resets; once the pipe filled (64 KiB, minutes at streaming rates),
+    // a blocking write wedged the producer thread -- the libusb backend
+    // thread -- stalling every device until the instrument's host-silence
+    // watchdog rebooted it.  With O_NONBLOCK the write returns EAGAIN,
+    // which is safe to drop: a full pipe is already poll-readable, so no
+    // wakeup is lost.
+    fcntl(ev->fd_signal, F_SETFL, O_NONBLOCK);
     return ev;
 }
 
@@ -167,14 +176,22 @@ void jsdrv_os_event_free(jsdrv_os_event_t ev) {
 void jsdrv_os_event_signal(jsdrv_os_event_t ev) {
     uint8_t wr_buf[1] = {1};
     if (write(ev->fd_signal, wr_buf, 1) <= 0) {
+        if ((EAGAIN == errno) || (EWOULDBLOCK == errno)) {
+            // Pipe full: already poll-readable, the wakeup is not lost.
+            return;
+        }
         JSDRV_LOGE("jsdrv_os_event_signal failed %d", errno);
     }
 }
 
 void jsdrv_os_event_reset(jsdrv_os_event_t ev) {
+    // Drain until empty (fd_poll is O_NONBLOCK).  A single bounded read
+    // left residue whenever more than one buffer of signal bytes had
+    // accumulated, ratcheting the pipe toward full; see
+    // jsdrv_os_event_alloc.
     uint8_t rd_buf[1024];
-    if (read(ev->fd_poll, rd_buf, sizeof(rd_buf)) < 0) {
-        ; // reset even on error.
+    while (read(ev->fd_poll, rd_buf, sizeof(rd_buf)) == (ssize_t) sizeof(rd_buf)) {
+        ;
     }
 }
 

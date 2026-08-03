@@ -133,12 +133,46 @@ static void test_pop_with_timeout_drains_burst(void ** state) {
     msg_queue_finalize(q, NULL);
 }
 
+// Sustained streaming pushes one wakeup byte per message and, since the
+// reset moved to queue-empty only, resets happen rarely.  The POSIX event
+// must (1) never block the producer on signal, even after 64 KiB of
+// unconsumed wakeups (a blocking pipe write wedged the libusb backend
+// thread after minutes of streaming, stalling every device until the
+// instrument's host-silence watchdog rebooted it), and (2) fully drain on
+// reset, not just one bounded read, so residue cannot ratchet the pipe
+// toward full.
+static void test_event_burst_never_blocks_and_fully_drains(void ** state) {
+    (void) state;
+    struct jsdrvp_msg_s m1;
+    struct msg_queue_s * q = msg_queue_init();
+
+    // More signals than a 64 KiB pipe holds, with no pop (and therefore
+    // no reset) in between: re-pushing the same message writes one wakeup
+    // byte per call while the queue stays non-empty.  The old blocking
+    // signal end hung here; nonblocking drops the excess, which is safe
+    // because a full pipe is already poll-readable.
+    msg_initialize(&m1);
+    for (uint32_t i = 0; i < 70000U; ++i) {
+        msg_queue_push(q, &m1);
+    }
+    assert_true(event_is_signaled(q));
+
+    // Popping to empty resets the event: the old single bounded read left
+    // residue (>1023 bytes here) and the event stayed signaled.
+    assert_ptr_equal(&m1, msg_queue_pop_immediate(q));
+    assert_null(msg_queue_pop_immediate(q));
+    assert_false(event_is_signaled(q));
+
+    msg_queue_finalize(q, NULL);
+}
+
 int main(void) {
     const struct CMUnitTest tests[] = {
             cmocka_unit_test(test_fifo_order),
             cmocka_unit_test(test_event_signaled_until_empty),
             cmocka_unit_test(test_pop_empty_resets_event),
             cmocka_unit_test(test_pop_with_timeout_drains_burst),
+            cmocka_unit_test(test_event_burst_never_blocks_and_fully_drains),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }
