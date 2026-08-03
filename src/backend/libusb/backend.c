@@ -701,6 +701,15 @@ static void bulk_in_close(struct dev_s * d, struct jsdrvp_msg_s * msg) {
     device_rsp(d, msg);
 }
 
+// Reclaim a stream-buffer loan returned by the upper layer: free the
+// loaned transfer (see on_bulk_in_done) and the message.
+static void stream_in_return_free(struct dev_s * d, struct jsdrvp_msg_s * msg) {
+    struct transfer_s * t;
+    t = JSDRV_CONTAINER_OF(msg->value.value.bin, struct transfer_s, buffer);
+    transfer_free(t);
+    jsdrvp_msg_free(d->backend->context, msg);
+}
+
 static bool device_handle_msg(struct dev_s * d, struct jsdrvp_msg_s * msg) {
     if (NULL == msg) {
         return false;
@@ -710,10 +719,7 @@ static bool device_handle_msg(struct dev_s * d, struct jsdrvp_msg_s * msg) {
         JSDRV_LOGD3("device_handle_msg %s", msg->topic);
     }
     if (0 == strcmp(JSDRV_USBBK_MSG_STREAM_IN_DATA, msg->topic)) {
-        struct transfer_s * t;
-        t = JSDRV_CONTAINER_OF(msg->value.value.bin, struct transfer_s, buffer);
-        transfer_free(t);
-        jsdrvp_msg_free(d->backend->context, msg);
+        stream_in_return_free(d, msg);
     } else if (0 == strcmp(JSDRV_USBBK_MSG_BULK_OUT_DATA, msg->topic)) {
         bulk_out_send(d, msg);
     } else if (msg->topic[0] == JSDRV_MSG_COMMAND_PREFIX_CHAR) {
@@ -779,6 +785,13 @@ static void process_devices(struct backend_s * s) {
             msg = msg_queue_pop_immediate(d->ll_device.cmd_q);
             if (NULL == msg) {
                 break;
+            }
+            if (0 == strcmp(JSDRV_USBBK_MSG_STREAM_IN_DATA, msg->topic)) {
+                // Stream-buffer loan returned after retirement: reclaim
+                // it here.  Echoing it with an error value would forge a
+                // STREAM_IN_DATA response whose value is not a buffer.
+                stream_in_return_free(d, msg);
+                continue;
             }
             JSDRV_LOGW("device closed, but message %s", msg->topic);
             msg->value = jsdrv_union_i32(JSDRV_ERROR_CLOSED);

@@ -492,6 +492,48 @@ static void test_ping_answered_with_pong(void ** state) {
     device_free(d);
 }
 
+// --- Test: LL_TERMINATED stops the rsp_q drain ---
+
+static void test_ll_terminated_stops_drain(void ** state) {
+    (void) state;
+    struct jsdrvp_mb_dev_s * d = device_alloc();
+    enter_open(d);
+
+    struct jsdrvp_msg_s * sentinel = jsdrvp_msg_alloc(d->context);
+    sentinel->inner_msg_type = JSDRV_MSG_TYPE_LL_TERMINATED;
+
+    // The sentinel is the last message of the LL session: handle_rsp
+    // must mark termination AND stop the drain loop so anything queued
+    // behind it (the slot's next life) is left alone.
+    assert_false(handle_rsp(d, sentinel));  // frees sentinel
+    assert_true(d->ll_terminated);
+    assert_int_equal(ST_CLOSED, d->state);
+
+    device_free(d);
+}
+
+// --- Test: non-BIN STREAM_IN_DATA is dropped, not returned as a loan ---
+
+static void test_stream_in_non_bin_dropped(void ** state) {
+    (void) state;
+    struct jsdrvp_mb_dev_s * d = device_alloc();
+    enter_open(d);
+
+    // A retired LL slot echoes returned messages with the topic
+    // preserved and the value rewritten to an error code.  Historic
+    // defect: this asserted (killing the host process) and would have
+    // returned the message to the backend as a fake buffer loan.
+    struct jsdrvp_msg_s * m = jsdrvp_msg_alloc(d->context);
+    jsdrv_cstr_copy(m->topic, JSDRV_USBBK_MSG_STREAM_IN_DATA, sizeof(m->topic));
+    m->value = jsdrv_union_i32(JSDRV_ERROR_CLOSED);
+
+    assert_true(handle_rsp(d, m));  // frees m; must not crash
+    assert_null(msg_queue_pop_immediate(d->ll.cmd_q));  // no loan return
+    assert_int_equal(ST_OPEN, d->state);
+
+    device_free(d);
+}
+
 // --- Test: device publishes are rejected while not open ---
 
 static void test_publish_rejected_when_closed(void ** state) {
@@ -512,6 +554,8 @@ int main(void) {
     const struct CMUnitTest tests[] = {
             cmocka_unit_test(test_state_set_chunking),
             cmocka_unit_test(test_close_request_in_closed_acks),
+            cmocka_unit_test(test_ll_terminated_stops_drain),
+            cmocka_unit_test(test_stream_in_non_bin_dropped),
             cmocka_unit_test(test_ping_answered_with_pong),
             cmocka_unit_test(test_publish_rejected_when_closed),
             cmocka_unit_test(test_silence_revalidate_pong),

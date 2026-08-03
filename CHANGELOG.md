@@ -82,6 +82,14 @@ This file contains the list of changes made to the Joulescope driver.
     Added msg_queue_test.
   * mb_device now answers device-initiated link PINGs with PONG and
     rejects device publishes with JSDRV_ERROR_CLOSED while not open.
+  * Fixed host process abort (exit from JSDRV_ASSERT) when a
+    MiniBitty-link device died mid-stream and re-enumerated: the libusb
+    retired-slot drain echoed returned stream-buffer loans back as
+    STREAM_IN_DATA messages with an i32 error value, and mb_device kept
+    draining past the LL_TERMINATED sentinel into the forged message.
+    The drain now reclaims loans (also fixing a transfer leak),
+    mb_device stops at the sentinel like js110/js220, and non-BIN
+    STREAM_IN_DATA messages are dropped instead of asserted fatal.
 * Fixed pyjoulescope_driver issues.
   * Fixed Record for u1/u4 signals (current_range, gpi, trigger_in):
     only fsr_f32 was ever called, so these recorded garbage.

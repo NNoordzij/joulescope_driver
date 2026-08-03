@@ -2202,7 +2202,6 @@ static void handle_stream_in_frame(struct jsdrvp_mb_dev_s * d, uint32_t * p_u32)
 }
 
 static void handle_stream_in(struct jsdrvp_mb_dev_s * d, struct jsdrvp_msg_s * msg) {
-    JSDRV_ASSERT(msg->value.type == JSDRV_UNION_BIN);
     d->rx_utc = jsdrv_time_utc();  // any RX proves the link is alive
     uint32_t frame_count = (msg->value.size + FRAME_SIZE_U8 - 1) / FRAME_SIZE_U8;
     for (uint32_t i = 0; i < frame_count; ++i) {
@@ -2268,9 +2267,22 @@ static bool handle_rsp(struct jsdrvp_mb_dev_s * d, struct jsdrvp_msg_s * msg) {
         // cleanly via jsdrvp_msg_free.
         msg->inner_msg_type = JSDRV_MSG_TYPE_NORMAL;
         jsdrvp_msg_free(d->context, msg);
-        return true;
+        // Stop draining: the sentinel is the last message of this LL
+        // session.  Anything queued behind it belongs to the slot's
+        // next life and must be left for its consumer (js110/js220
+        // stop here for the same reason).
+        return false;
     }
     if (0 == strcmp(JSDRV_USBBK_MSG_STREAM_IN_DATA, msg->topic)) {
+        if (JSDRV_UNION_BIN != msg->value.type) {
+            // Not a loaned stream buffer: e.g. a retired-slot echo that
+            // rewrote the value to an error code.  Returning it to the
+            // backend would be treated as a buffer loan, so free it.
+            JSDRV_LOGW("stream_in_data with non-bin type %d: drop",
+                       (int) msg->value.type);
+            jsdrvp_msg_free(d->context, msg);
+            return true;
+        }
         JSDRV_LOGD3("stream_in_data sz=%d", (int) msg->value.size);
         handle_stream_in(d, msg);
         msg_queue_push(d->ll.cmd_q, msg);  // return
