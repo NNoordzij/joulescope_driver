@@ -336,7 +336,15 @@ jobs:
 
   push_bench_tools:
     name: Push bench tools to joulescope_ci
-    if: github.event_name == 'push'
+    # Only push tools that will run on the joulescope_ci benches from
+    # refs we deliberately control: main and release tags.  Branch
+    # pushes (including Dependabot's dependabot/* branches) and all
+    # pull_request events must never reach the coordinator.
+    if: >-
+      github.event_name == 'push' &&
+      github.repository == 'jetperch/joulescope_driver' &&
+      (github.ref == 'refs/heads/main' ||
+      startsWith(github.ref, 'refs/tags/v'))
     needs:
       - build_native_win
       - build_native_posix
