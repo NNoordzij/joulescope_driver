@@ -478,6 +478,19 @@ static struct bulk_out_s * bulk_out_initialize(struct dev_s * dev, uint8_t pipe_
     struct bulk_out_s * b = jsdrv_alloc_clr(sizeof(struct bulk_out_s));
     b->ep.dev = dev;
     b->ep.pipe_id = pipe_id & ~0x80;  // force OUT
+    // First OUT use of this open session (device_close finalizes all
+    // endpoints, so this runs once per open): reset the pipe, which
+    // issues CLEAR_FEATURE(ENDPOINT_HALT) and re-synchronizes the
+    // device's bulk OUT data toggle with the host controller.  Device
+    // firmware with the stub SET_INTERFACE (fielded MiniBitty, fixed
+    // 2026-08) keeps a stale toggle across re-open and hardware-discards
+    // the session's first OUT packet, costing one 250 ms link
+    // retransmit.  Mirrors the libusb bulk_out_send clear_halt.
+    // NOTE: Windows HIL validation pending (added 2026-08-04 for parity;
+    // validated on Linux/libusb only).
+    if (!WinUsb_ResetPipe(dev->winusb, b->ep.pipe_id)) {
+        WINDOWS_LOGE("%s", "bulk_out_initialize WinUsb_ResetPipe");
+    }
     b->ep.event = CreateEvent(
             NULL,  // default security attributes
             TRUE,  // manual reset event

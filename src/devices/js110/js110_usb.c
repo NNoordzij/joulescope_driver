@@ -1530,6 +1530,15 @@ static bool handle_rsp(struct js110_dev_s * d, struct jsdrvp_msg_s * msg) {
         return false;
     }
     if (0 == strcmp(JSDRV_USBBK_MSG_STREAM_IN_DATA, msg->topic)) {
+        if (JSDRV_UNION_BIN != msg->value.type) {
+            // Not a loaned stream buffer.  Returning it to the backend
+            // would be treated as a buffer loan, so free it (mirrors
+            // the mb_device handle_rsp guard).
+            JSDRV_LOGW("stream_in_data with non-bin type %d: drop",
+                       (int) msg->value.type);
+            jsdrvp_msg_free(d->context, msg);
+            return true;
+        }
         handle_stream_in(d, msg);
         msg_queue_push(d->ll.cmd_q, msg);  // return
         return true;

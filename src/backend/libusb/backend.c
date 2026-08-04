@@ -727,6 +727,16 @@ static void bulk_in_close(struct dev_s * d, struct jsdrvp_msg_s * msg) {
 // loaned transfer (see on_bulk_in_done) and the message.
 static void stream_in_return_free(struct dev_s * d, struct jsdrvp_msg_s * msg) {
     struct transfer_s * t;
+    if (JSDRV_UNION_BIN != msg->value.type) {
+        // Not a loaned stream buffer: CONTAINER_OF on a non-pointer
+        // value would reclaim a garbage transfer.  Mirrors the
+        // mb_device handle_rsp guard; unreachable today (upper layers
+        // only return real loans), kept as symmetric defense.
+        JSDRV_LOGW("stream_in return with non-bin type %d: drop",
+                   (int) msg->value.type);
+        jsdrvp_msg_free(d->backend->context, msg);
+        return;
+    }
     t = JSDRV_CONTAINER_OF(msg->value.value.bin, struct transfer_s, buffer);
     transfer_free(t);
     jsdrvp_msg_free(d->backend->context, msg);
@@ -815,9 +825,16 @@ static void process_devices(struct backend_s * s) {
                 stream_in_return_free(d, msg);
                 continue;
             }
-            JSDRV_LOGW("device closed, but message %s", msg->topic);
-            msg->value = jsdrv_union_i32(JSDRV_ERROR_CLOSED);
-            msg_queue_push(d->ll_device.rsp_q, msg);
+            // Any other message reached this cmd_q after the
+            // LL_TERMINATED sentinel was pushed (retirement precedes
+            // this drain), and every UL consumer stops draining rsp_q
+            // at that sentinel.  An echoed response would therefore
+            // never reach its intended consumer: it would dead-letter
+            // into the slot's next life (possibly a different physical
+            // device) as a spurious ACK/NACK.  Free it instead.
+            JSDRV_LOGW("retired device %s: drop message %s",
+                       d->ll_device.prefix, msg->topic);
+            jsdrvp_msg_free(s->context, msg);
         };
     }
 

@@ -6,7 +6,7 @@ This file contains the list of changes made to the Joulescope driver.
 
 ## 2.4.0
 
-2026 Aug 1
+2026 Aug 4
 
 * Performed a full design review focused on incomplete and partially
   complete features; findings and remaining work are tracked in
@@ -28,7 +28,7 @@ This file contains the list of changes made to the Joulescope driver.
   * Fixed request pool leak on failed requests and the finalize
     off-by-one that leaked buffer id 16's thread on shutdown.
 * Fixed JS220 issues.
-  * Fixed h/i_scale and h/v_scale, which were completely broken: the
+  * Fixed h/i_scale and h/v_scale, which were broken: the
     metadata published without the $ suffix (JSON became the retained
     value) and the handler read the unconverted union value.
   * Rejected h/fs=0 and h/fp=0 (divide-by-zero) and invalid h/filter
@@ -80,6 +80,22 @@ This file contains the list of changes made to the Joulescope driver.
     after fire-and-forget publishes (issue #13's remaining symptom).
     Now matches the WinUSB queue: reset only when the queue empties.
     Added msg_queue_test.
+  * POSIX event pipe: the signal end is now nonblocking and reset
+    drains until empty.  Sustained streaming wrote one wakeup byte per
+    msg_queue_push while resets ran only when a queue emptied, so the
+    pipe could fill (64 KiB) and a blocking write then wedged the
+    producer -- the libusb backend thread -- stalling every device
+    until the instrument's host-silence watchdog rebooted it.  Dropped
+    writes on a full pipe are safe: the pipe is already poll-readable.
+    Added a regression test.
+  * libusb now issues a bulk OUT clear_halt on the first OUT of each
+    open session, and WinUSB resets the bulk OUT pipe on first use per
+    open (Windows HIL validation pending).  This re-synchronizes the
+    device's data toggle for fielded firmware with the stub
+    SET_INTERFACE handler (fixed in MiniBitty 2026-08), which otherwise
+    hardware-discarded the session's first OUT packet as a duplicate,
+    costing one 250 ms link retransmit per open (measured raw-open
+    worst case 258 ms -> 8.3 ms on NUCLEO-C542RC with old firmware).
   * mb_device now answers device-initiated link PINGs with PONG and
     rejects device publishes with JSDRV_ERROR_CLOSED while not open.
   * Fixed host process abort (exit from JSDRV_ASSERT) when a
@@ -89,7 +105,11 @@ This file contains the list of changes made to the Joulescope driver.
     draining past the LL_TERMINATED sentinel into the forged message.
     The drain now reclaims loans (also fixing a transfer leak),
     mb_device stops at the sentinel like js110/js220, and non-BIN
-    STREAM_IN_DATA messages are dropped instead of asserted fatal.
+    STREAM_IN_DATA messages are dropped instead of asserted fatal
+    (guard now also in js110/js220 and the libusb loan-reclaim path).
+    The retired-slot drain now frees other late messages instead of
+    echoing error responses that could only dead-letter into the
+    slot's next session behind the sentinel.
 * Fixed pyjoulescope_driver issues.
   * Fixed Record for u1/u4 signals (current_range, gpi, trigger_in):
     only fsr_f32 was ever called, so these recorded garbage.
