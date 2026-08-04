@@ -111,7 +111,7 @@ def _parse_args(argv):
     p.add_argument('--run-id', required=True)
     p.add_argument('--build-kind', default='dev', choices=['dev', 'release'])
     p.add_argument('--artifact-type', default='firmware',
-                   choices=['firmware', 'python_wheel', 'tool'])
+                   choices=['firmware', 'python_wheel', 'tool', 'ui'])
     p.add_argument('--os', default='', dest='tool_os',
                    help='tool pushes: target bench os (linux/windows/macos)')
     p.add_argument('--arch', default='', dest='tool_arch',
