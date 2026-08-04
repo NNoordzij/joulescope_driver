@@ -151,6 +151,16 @@ struct dev_s {
     uint32_t bulk_in_retry_at_ms;
     uint32_t bulk_in_retry_delay_ms;
 
+    // Bulk OUT pipes that have had libusb_clear_halt since device_open.
+    // The first OUT of each session gets a clear_halt to resynchronize the
+    // device's data toggle: SET_INTERFACE (issued at every open) resets the
+    // host controller's toggles, and device firmware without the equivalent
+    // endpoint reset (a longstanding MiniBitty stub, fixed 2026-08) keeps a
+    // stale toggle -- the hardware then ACKs-and-discards the session's
+    // first OUT packet as a presumed duplicate, costing one 250 ms link
+    // retransmit.  bulk_in_open has always done this for the IN direction.
+    bool bulk_out_halt_cleared[ENDPOINT_COUNT];
+
     struct jsdrv_list_s item;
 };
 
@@ -333,6 +343,9 @@ static int32_t device_open(struct dev_s * d) {
         JSDRV_LOGE("libusb_set_interface_alt_setting failed: %d", rc);
         return (int32_t) rc;
     }
+    // Fresh session: each bulk OUT pipe gets a toggle-resynchronizing
+    // clear_halt on first use (see bulk_out_halt_cleared).
+    memset(d->bulk_out_halt_cleared, 0, sizeof(d->bulk_out_halt_cleared));
     d->mode = DEVICE_MODE_OPEN;
     return (int32_t) rc;
 }
@@ -421,10 +434,19 @@ static void bulk_out_send(struct dev_s * d, struct jsdrvp_msg_s * msg) {
     if (device_closed_reply(d, msg, false)) {
         return;
     }
+    uint8_t ep = msg->extra.bkusb_stream.endpoint;
+    if (!d->bulk_out_halt_cleared[ep & 0x7f]) {
+        // First OUT of this session: resynchronize the device's data toggle
+        // (see bulk_out_halt_cleared).
+        d->bulk_out_halt_cleared[ep & 0x7f] = true;
+        int rv = libusb_clear_halt(d->handle, ep);
+        if (rv) {
+            JSDRV_LOGI("bulk_out clear_halt failed with %d", rv);
+        }
+    }
     struct transfer_s * t = transfer_alloc(d);
     t->msg = msg;
     JSDRV_LOGI("bulk_out_send(%s) %d bytes", d->ll_device.prefix, (int) msg->value.size);
-    uint8_t ep = msg->extra.bkusb_stream.endpoint;
     libusb_fill_bulk_transfer(t->transfer, d->handle, ep,
                               msg->payload.bin, msg->value.size,
                               on_bulk_out_done, t, BULK_OUT_TIMEOUT_MS);
