@@ -115,7 +115,7 @@ def on_cmd(args):
             return 1
         device = devices[0]
         model = device.split('/')[1]
-        if model not in ['js110', 'js220']:
+        if model not in ['js110', 'js220', 'js320']:
             print(f'Unsupported device {device}')
             return 1
         d.open(device)
