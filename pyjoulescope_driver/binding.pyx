@@ -43,6 +43,7 @@ __all__ = ['Driver', 'calibration_hash']
 np.import_array()                           # initialize numpy before use
 _log_c_name = 'jsdrv'
 _log_c = logging.getLogger(_log_c_name)
+_log = logging.getLogger(__name__)
 
 
 class ElementType:
@@ -346,6 +347,7 @@ cdef object _jsdrv_union_to_py(const c_jsdrv.jsdrv_union_s * value):
             try:
                 v = json.loads(v)
             except Exception:
+                _log.warning('invalid JSON payload replaced with None: %r', v[:256])
                 v = None
         elif t == c_jsdrv.JSDRV_UNION_BIN:
             if value[0].app == c_jsdrv.JSDRV_PAYLOAD_TYPE_STREAM:

@@ -152,15 +152,41 @@ static const char * dtype_to_str(uint8_t dtype) {
     }
 }
 
-// Escape a string for JSON output (minimal: just escape quotes and backslashes)
+// Escape a string for JSON output: quotes, backslashes, and control
+// characters.  Multi-line metadata detail strings contain raw newlines
+// which are invalid inside JSON string literals.
 static int json_escape_str(char * dst, int dst_len, const char * src) {
     int pos = 0;
-    for (; *src && pos < dst_len - 2; ++src) {
-        if (*src == '"' || *src == '\\') {
-            if (pos + 2 >= dst_len - 1) break;
-            dst[pos++] = '\\';
+    char u_buf[8];
+    for (; *src; ++src) {
+        char c = *src;
+        const char * esc = NULL;
+        switch (c) {
+            case '"':  esc = "\\\""; break;
+            case '\\': esc = "\\\\"; break;
+            case '\n': esc = "\\n"; break;
+            case '\r': esc = "\\r"; break;
+            case '\t': esc = "\\t"; break;
+            default:
+                if ((uint8_t) c < 0x20) {
+                    snprintf(u_buf, sizeof(u_buf), "\\u%04x", (unsigned) (uint8_t) c);
+                    esc = u_buf;
+                }
+                break;
         }
-        dst[pos++] = *src;
+        if (esc) {
+            int n = (int) strlen(esc);
+            if (pos + n >= dst_len) {
+                break;  // never emit a partial escape sequence
+            }
+            memcpy(dst + pos, esc, n);
+            pos += n;
+        } else {
+            if (pos + 1 >= dst_len) {
+                break;
+            }
+            dst[pos++] = c;
+        }
     }
     dst[pos] = '\0';
     return pos;

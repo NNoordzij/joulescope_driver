@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from pyjoulescope_driver import Driver, __version__
+from .metadata import metadata_load
 import numpy as np
 import os
 import platform
@@ -124,11 +125,6 @@ class Info:
     def _on_pub(self, topic, value):
         self._values[topic] = value
 
-    def _on_metadata(self, topic, value):
-        if topic[-1] == '$':
-            topic = topic[:-1]
-        self._meta[topic] = value
-
     def run(self, args):
         if not self._device_paths:
             print(_sys_info())
@@ -146,28 +142,24 @@ class Info:
                 if device_path not in devices:
                     print(f'{device_path} requested but not found')
                     continue
-                self._meta.clear()
                 self._values.clear()
                 d.open(device_path, mode=args.open)
-                fn = self._on_metadata  # use same bound method for unsubscribe
-                d.subscribe(device_path, 'metadata_rsp_retain', fn)
-                d.unsubscribe(device_path, fn)
+                self._meta = metadata_load(d, device_path)
                 fn = self._on_pub  # use same bound method for unsubscribe
                 d.subscribe(device_path, 'pub_retain', fn)
                 d.unsubscribe(device_path, fn)
                 if args.verbose:
                     print(f'{device_path} metadata:')
-                    for key, value in self._meta.items():
-                        subtopic = key[len(device_path) + 1:]
+                    for subtopic, value in self._meta.items():
                         print(f'  {subtopic} {value}')
                 print(f'{device_path} values:')
                 for key, value in self._values.items():
-                    meta = self._meta.get(key, None)
+                    subtopic = key[len(device_path) + 1:]
+                    meta = self._meta.get(subtopic, None)
                     if meta is not None:
                         fmt = meta.get('format', None)
                         if fmt == 'version':
                             value = version_to_str(value)
-                    subtopic = key[len(device_path) + 1:]
                     print(f'  {subtopic} = {value}')
         return 0
 

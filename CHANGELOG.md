@@ -9,6 +9,8 @@ This file contains the list of changes made to the Joulescope driver.
 2026 Aug 7 [in progress]
 
 * Added JS320 support to "pyjoulescope_driver measure".
+* Added "metadata" entry point to pyjoulescope_driver.
+* Fixed metadata parsing.
 
 
 ## 2.4.0
