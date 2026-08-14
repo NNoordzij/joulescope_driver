@@ -31,12 +31,19 @@ See the "example" subdirectory for examples of how to use this package.
 
 Install node.js and npm.  See [instructions](https://nodejs.github.io/node-addon-examples/getting-started/tools).
 
-```
+```sh
 npm install
 npm test
 ```
 
+The driver can be included into a nodejs project. To prepare the driver for it, run the following command
 
+```sh
+npm install
+npm prebuild
+```
+
+This command creates a *.node file that the node project first searches for when adding the driver. This prevent the project from rebuilding the entire driver again when adding.
 
 ## References
 
