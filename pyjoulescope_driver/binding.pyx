@@ -43,6 +43,7 @@ __all__ = ['Driver', 'calibration_hash']
 np.import_array()                           # initialize numpy before use
 _log_c_name = 'jsdrv'
 _log_c = logging.getLogger(_log_c_name)
+_log = logging.getLogger(__name__)
 
 
 class ElementType:
@@ -346,6 +347,7 @@ cdef object _jsdrv_union_to_py(const c_jsdrv.jsdrv_union_s * value):
             try:
                 v = json.loads(v)
             except Exception:
+                _log.warning('invalid JSON payload replaced with None: %r', v[:256])
                 v = None
         elif t == c_jsdrv.JSDRV_UNION_BIN:
             if value[0].app == c_jsdrv.JSDRV_PAYLOAD_TYPE_STREAM:
@@ -399,7 +401,12 @@ cdef object _jsdrv_union_to_py(const c_jsdrv.jsdrv_union_s * value):
             elif value[0].app == c_jsdrv.JSDRV_PAYLOAD_TYPE_STATISTICS:
                 stats = <c_jsdrv.jsdrv_statistics_s *> &(value[0].value.bin[0])
                 sample_freq = stats[0].sample_freq
-                samples_full_rate = stats[0].block_sample_count * stats[0].decimate_factor
+                # u8 decimate_factor saturates at 255; decimate_factor32 has the
+                # exact value (0 from older producers - fall back)
+                decimate_factor = stats[0].decimate_factor32
+                if decimate_factor == 0:
+                    decimate_factor = stats[0].decimate_factor
+                samples_full_rate = stats[0].block_sample_count * decimate_factor
                 sample_id_start = stats[0].block_sample_id
                 sample_id_end = stats[0].block_sample_id + samples_full_rate
                 t_start = sample_id_start / sample_freq
@@ -419,7 +426,7 @@ cdef object _jsdrv_union_to_py(const c_jsdrv.jsdrv_union_s * value):
                         'sample_freq': {'value': sample_freq, 'units': 'Hz'},
                         'range': {'value': [t_start, t_start + t_delta], 'units': 's'},
                         'delta': {'value': t_delta, 'units': 's'},
-                        'decimate_factor': {'value': stats[0].decimate_factor, 'units': 'samples'},
+                        'decimate_factor': {'value': decimate_factor, 'units': 'samples'},
                         'decimate_sample_count': {'value': stats[0].block_sample_count, 'units': 'samples'},
                         'accum_samples': {'value': [stats[0].accum_sample_id, sample_id_end], 'units': 'samples'},
                         'time_map': {
@@ -1055,8 +1062,11 @@ cdef class Driver:
 
         :param device_prefix: The prefix name for the device.
         :param mode: The open mode which is one of:
-            * 'defaults': Reconfigure the device for default operation.
-            * 'restore': Update our state with the current device state.
+            * 'defaults': Push state to the device: the host's retained
+              value for each writable topic when present, else the
+              metadata default.
+            * 'restore': Push nothing; adopt the device's current state
+              into the host cache.
             * 'raw': Open the device in raw mode for development or firmware update.
             * None: equivalent to 'defaults'.
         :param timeout: The timeout in seconds.  None uses the default timeout.

@@ -27,6 +27,7 @@
 #include "jsdrv.h"
 #include "jsdrv_prv/list.h"
 #include "jsdrv_prv/msg_queue.h"
+#include <stdbool.h>
 #include <stdint.h>
 
 
@@ -81,14 +82,25 @@ struct bufsig_s {
 };
 
 /**
+ * @brief Check if this module supports an element type.
+ *
+ * @param element_type The jsdrv_element_type_e value.
+ * @param element_size_bits The element size in bits.
+ * @return true if supported by jsdrv_bufsig_alloc, false otherwise.
+ */
+bool jsdrv_bufsig_element_type_is_supported(uint8_t element_type, uint8_t element_size_bits);
+
+/**
  * @brief Allocate the sample buffer and reductions.
  *
- * @param self The buffer instance.
+ * @param self The buffer instance with hdr already populated.
  * @param N The total number of samples to store.
  * @param r0 The number of samples in the first reduction.
  * @param rN The number of samples in subsequent reductions.
+ * @return 0 or JSDRV_ERROR_NOT_SUPPORTED when the hdr element type
+ *      is not supported.  On error, no memory is allocated.
  */
-void jsdrv_bufsig_alloc(struct bufsig_s * self, uint64_t N, uint64_t r0, uint64_t rN);
+int32_t jsdrv_bufsig_alloc(struct bufsig_s * self, uint64_t N, uint64_t r0, uint64_t rN);
 
 void jsdrv_bufsig_free(struct bufsig_s * self);
 

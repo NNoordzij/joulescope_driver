@@ -50,6 +50,44 @@
 #define ENDPOINT_COUNT                  (256U)
 #define CLOSE_TIMEOUT_MS                (2000U)
 
+// This backend serves both Linux (linux_usbfs) and macOS (darwin_usb).  On
+// both, a bus suspend and a device removal both fail the in-flight bulk IN
+// transfers with completion status LIBUSB_TRANSFER_ERROR, so the completion
+// status cannot tell them apart.  The pipe is therefore re-armed until either a
+// transfer completes (the device is back) or the device is found to be gone.
+//
+// The re-arm is what distinguishes them, and only removal yields
+// LIBUSB_ERROR_NO_DEVICE:
+//   - Linux: a suspended device refuses IOCTL_USBFS_SUBMITURB with EHOSTUNREACH
+//     -> LIBUSB_ERROR_IO; a removed device gives ENODEV -> LIBUSB_ERROR_NO_DEVICE.
+//   - macOS: a removed device gives kIOReturnNoDevice -> LIBUSB_ERROR_NO_DEVICE;
+//     a suspended/unresponsive device gives LIBUSB_ERROR_OTHER.
+// So the classification is "NO_DEVICE means gone, any other error means keep
+// retrying", not a match on the suspend code, which differs per platform.  Both
+// fail synchronously without a completion callback, so bulk_in_retry_process()
+// owns the retry and the backoff.
+//
+// The delay throttles those refused submits.  On Linux, re-arming faster than a
+// few milliseconds makes the kernel intermittently report the *suspended*
+// device as removed: measured over 8 suspends, a 1-2 ms retry period faked
+// LIBUSB_TRANSFER_NO_DEVICE 3 times, while 3 ms and slower never did in 9.  That
+// is a race rather than a threshold, so the initial delay keeps well clear of
+// it and the backoff caps the resume-detection latency, which bounds the
+// samples lost after the host wakes.  (macOS timing is not yet characterized;
+// these values are conservative for it.)
+#define BULK_IN_RETRY_DELAY_MS          (5U)
+#define BULK_IN_RETRY_DELAY_MAX_MS      (100U)
+
+// A device can die without a hotplug event: a host-sleep reset-resume
+// force-unbinds usbfs, so transfers fail with NO_DEVICE while the device
+// never leaves the bus and udev/libusb never report LEFT or ARRIVED.
+// After tearing down such a device, rescan on a timer so the (still
+// present, kernel-rebound) device is re-announced through the normal
+// device_add path and clients can reconnect.  Bounded so a device that
+// was genuinely unplugged while the host slept does not scan forever.
+#define RESCAN_INTERVAL_MS              (500U)
+#define RESCAN_COUNT                    (60U)   // 60 * 500 ms = 30 s
+
 
 enum device_mark_e {
     DEVICE_MARK_NONE = 0,
@@ -107,6 +145,22 @@ struct dev_s {
     struct jsdrv_list_s transfers_pending;
     struct jsdrv_list_s transfers_free;
 
+    // Bulk IN pipes whose transfers failed and must be re-armed.  delay_ms is
+    // zero when no retry is scheduled, and backs off while failures continue.
+    bool bulk_in_retry[ENDPOINT_COUNT];
+    uint32_t bulk_in_retry_at_ms;
+    uint32_t bulk_in_retry_delay_ms;
+
+    // Bulk OUT pipes that have had libusb_clear_halt since device_open.
+    // The first OUT of each session gets a clear_halt to resynchronize the
+    // device's data toggle: SET_INTERFACE (issued at every open) resets the
+    // host controller's toggles, and device firmware without the equivalent
+    // endpoint reset (a longstanding MiniBitty stub, fixed 2026-08) keeps a
+    // stale toggle -- the hardware then ACKs-and-discards the session's
+    // first OUT packet as a presumed duplicate, costing one 250 ms link
+    // retransmit.  bulk_in_open has always done this for the IN direction.
+    bool bulk_out_halt_cleared[ENDPOINT_COUNT];
+
     struct jsdrv_list_s item;
 };
 
@@ -122,6 +176,12 @@ struct backend_s {
     struct jsdrv_list_s devices_active;
 
     jsdrv_os_event_t hotplug_event;
+
+    // Timed rescan after a silent (no hotplug event) device death.
+    // rescan_remaining is 0 when inactive; see RESCAN_INTERVAL_MS.
+    uint32_t rescan_remaining;
+    uint32_t rescan_at_ms;
+
     volatile bool do_exit;
     pthread_t thread_id;
 };
@@ -283,6 +343,9 @@ static int32_t device_open(struct dev_s * d) {
         JSDRV_LOGE("libusb_set_interface_alt_setting failed: %d", rc);
         return (int32_t) rc;
     }
+    // Fresh session: each bulk OUT pipe gets a toggle-resynchronizing
+    // clear_halt on first use (see bulk_out_halt_cleared).
+    memset(d->bulk_out_halt_cleared, 0, sizeof(d->bulk_out_halt_cleared));
     d->mode = DEVICE_MODE_OPEN;
     return (int32_t) rc;
 }
@@ -300,10 +363,12 @@ static const char * transfer_status_to_str(int32_t status) {
     }
 }
 
-static void submit_transfer(struct transfer_s * t) {
+// Returns the libusb status.  On failure the transfer is freed and no
+// completion callback will run, so the caller owns any retry.
+static int submit_transfer(struct transfer_s * t) {
     int rc = libusb_submit_transfer(t->transfer);
     if (rc) {
-        JSDRV_LOGW("libusb_submit_transfer returned %d", rc);
+        JSDRV_LOGD1("libusb_submit_transfer returned %d", rc);
         if (t->msg) {
             if ((t->transfer->endpoint & 0x7f) == 0) {
                 t->msg->extra.bkusb_ctrl.status = JSDRV_ERROR_IO;
@@ -315,6 +380,7 @@ static void submit_transfer(struct transfer_s * t) {
         }
         transfer_free(t);
     }
+    return rc;
 }
 
 static void device_rsp(struct dev_s * d, struct jsdrvp_msg_s * msg) {
@@ -368,10 +434,19 @@ static void bulk_out_send(struct dev_s * d, struct jsdrvp_msg_s * msg) {
     if (device_closed_reply(d, msg, false)) {
         return;
     }
+    uint8_t ep = msg->extra.bkusb_stream.endpoint;
+    if (!d->bulk_out_halt_cleared[ep & 0x7f]) {
+        // First OUT of this session: resynchronize the device's data toggle
+        // (see bulk_out_halt_cleared).
+        d->bulk_out_halt_cleared[ep & 0x7f] = true;
+        int rv = libusb_clear_halt(d->handle, ep);
+        if (rv) {
+            JSDRV_LOGI("bulk_out clear_halt failed with %d", rv);
+        }
+    }
     struct transfer_s * t = transfer_alloc(d);
     t->msg = msg;
     JSDRV_LOGI("bulk_out_send(%s) %d bytes", d->ll_device.prefix, (int) msg->value.size);
-    uint8_t ep = msg->extra.bkusb_stream.endpoint;
     libusb_fill_bulk_transfer(t->transfer, d->handle, ep,
                               msg->payload.bin, msg->value.size,
                               on_bulk_out_done, t, BULK_OUT_TIMEOUT_MS);
@@ -446,7 +521,34 @@ static void ctrl_out_start(struct dev_s * d, struct jsdrvp_msg_s * msg) {
     }
 }
 
-static void bulk_in_start(struct dev_s * d, uint8_t pipe_id);
+static int bulk_in_start(struct dev_s * d, uint8_t pipe_id);
+
+static void bulk_in_retry_backoff(struct dev_s * d) {
+    if (0 == d->bulk_in_retry_delay_ms) {
+        d->bulk_in_retry_delay_ms = BULK_IN_RETRY_DELAY_MS;
+    } else if (d->bulk_in_retry_delay_ms < BULK_IN_RETRY_DELAY_MAX_MS) {
+        d->bulk_in_retry_delay_ms *= 2;
+        if (d->bulk_in_retry_delay_ms > BULK_IN_RETRY_DELAY_MAX_MS) {
+            d->bulk_in_retry_delay_ms = BULK_IN_RETRY_DELAY_MAX_MS;
+        }
+    }
+}
+
+// Mark the pipe for re-arming and schedule the retry.
+static void bulk_in_retry_schedule(struct dev_s * d, uint8_t pipe_id) {
+    d->bulk_in_retry[pipe_id] = true;
+    bulk_in_retry_backoff(d);
+    d->bulk_in_retry_at_ms = jsdrv_time_ms_u32() + d->bulk_in_retry_delay_ms;
+}
+
+// Cancel any scheduled re-arm.  Used when the device goes away, and on a
+// completed transfer, which is the only proof the pipe is alive again.
+static void bulk_in_retry_clear(struct dev_s * d) {
+    if (0 != d->bulk_in_retry_delay_ms) {
+        d->bulk_in_retry_delay_ms = 0;
+        memset(d->bulk_in_retry, 0, sizeof(d->bulk_in_retry));
+    }
+}
 
 static void on_bulk_in_done(struct libusb_transfer * transfer) {
     struct transfer_s *t = (struct transfer_s *) transfer->user_data;
@@ -457,6 +559,7 @@ static void on_bulk_in_done(struct libusb_transfer * transfer) {
                 d->ll_device.prefix, transfer->status, t->transfer->actual_length);
     switch (transfer->status) {
         case LIBUSB_TRANSFER_COMPLETED:
+            bulk_in_retry_clear(d);
             bulk_in_start(t->device, pipe_id);
             if (0 == t->transfer->actual_length) {
                 JSDRV_LOGW("zero length bulk in transfer");
@@ -478,28 +581,110 @@ static void on_bulk_in_done(struct libusb_transfer * transfer) {
             transfer_free(t);
             break;
         case LIBUSB_TRANSFER_NO_DEVICE:
+            bulk_in_retry_clear(d);
             t->device->mode = DEVICE_MODE_UNASSIGNED;
             transfer_free(t);
             break;
         default:
-            JSDRV_LOGW("bulk_in error %d", transfer->status);
-            transfer_free(t);
+            // A bus suspend and a device removal both land here.  Re-arm the
+            // pipe after a delay; if the device really is gone, hotplug tears
+            // it down first and the retry is dropped.
+            JSDRV_LOGI("bulk_in %s, length=%d, retry in %u ms",
+                       transfer_status_to_str(transfer->status),
+                       (int) transfer->actual_length,
+                       (unsigned) d->bulk_in_retry_delay_ms);
+            bulk_in_retry_schedule(d, pipe_id);
+            // The transfer may carry data the device already sent.  Deliver it
+            // rather than discard it, but only when it is whole frames: a torn
+            // frame would desync the upper-layer parser.
+            if ((transfer->actual_length > 0)
+                    && (0 == (transfer->actual_length % BULK_IN_FRAME_LENGTH))) {
+                jsdrv_list_remove(&t->item);  // temporary loan to upper layer
+                m = jsdrvp_msg_alloc(t->device->backend->context);
+                jsdrv_cstr_copy(m->topic, JSDRV_USBBK_MSG_STREAM_IN_DATA, sizeof(m->topic));
+                m->value = jsdrv_union_bin(t->buffer, t->transfer->actual_length);
+                m->extra.bkusb_stream.endpoint = t->transfer->endpoint;
+                device_rsp(d, m);
+            } else {
+                transfer_free(t);
+            }
             break;
     }
 }
 
-static void bulk_in_start(struct dev_s * d, uint8_t pipe_id) {
-    if (d->mode != DEVICE_MODE_OPEN) {
+static uint32_t bulk_in_outstanding(struct dev_s * d, uint8_t pipe_id) {
+    struct jsdrv_list_s * item;
+    uint32_t count = 0;
+    jsdrv_list_foreach(&d->transfers_pending, item) {
+        struct transfer_s * t = JSDRV_CONTAINER_OF(item, struct transfer_s, item);
+        if (t->transfer->endpoint == pipe_id) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+// Re-arm the failed bulk IN pipes once the retry delay elapses.  Top up to the
+// target rather than counting owed transfers: submit_transfer() can fail
+// synchronously and free the transfer without a callback, so a count would
+// leak and leave the pipe permanently short.  A top-up self-corrects.
+static void bulk_in_retry_process(struct dev_s * d) {
+    if (0 == d->bulk_in_retry_delay_ms) {
+        return;  // no retry scheduled
+    }
+    if ((d->mode != DEVICE_MODE_OPEN) || d->removing) {
+        bulk_in_retry_clear(d);  // the device went away; hotplug owns it now
         return;
     }
+    if ((int32_t) (jsdrv_time_ms_u32() - d->bulk_in_retry_at_ms) < 0) {
+        return;  // not yet
+    }
+    bool failed = false;
+    for (uint32_t pipe_id = 0; pipe_id < ENDPOINT_COUNT; ++pipe_id) {
+        if (!d->bulk_in_retry[pipe_id]) {
+            continue;
+        }
+        uint32_t outstanding = bulk_in_outstanding(d, (uint8_t) pipe_id);
+        for (; outstanding < BULK_IN_TRANSFER_OUTSTANDING; ++outstanding) {
+            int rc = bulk_in_start(d, (uint8_t) pipe_id);
+            if (LIBUSB_ERROR_NO_DEVICE == rc) {
+                // The kernel reports ENODEV only when the device is gone.  A
+                // suspended device gives EHOSTUNREACH, which libusb maps to
+                // LIBUSB_ERROR_IO, so the two are distinguishable here even
+                // though the completion status is LIBUSB_TRANSFER_ERROR for both.
+                JSDRV_LOGI("bulk_in retry: device removed");
+                bulk_in_retry_clear(d);
+                d->mode = DEVICE_MODE_UNASSIGNED;
+                return;
+            } else if (rc) {
+                failed = true;
+                break;  // still suspended; do not burn the remaining submits
+            }
+        }
+    }
+    if (failed) {
+        // A synchronous submit failure never calls on_bulk_in_done(), so the
+        // backoff must grow here or the retry becomes a busy-loop: at a fixed
+        // delay a long suspend costs 4 failed submits every period, and a
+        // sub-millisecond period makes the kernel report the device as gone.
+        bulk_in_retry_backoff(d);
+    }
+    // Stay armed: only a completed transfer clears the retry.
+    d->bulk_in_retry_at_ms = jsdrv_time_ms_u32() + d->bulk_in_retry_delay_ms;
+}
+
+static int bulk_in_start(struct dev_s * d, uint8_t pipe_id) {
+    if (d->mode != DEVICE_MODE_OPEN) {
+        return LIBUSB_ERROR_NO_DEVICE;
+    }
     if (d->endpoint_mode[pipe_id] != EP_MODE_BULK_IN) {
-        return;
+        return LIBUSB_SUCCESS;
     }
     struct transfer_s * t = transfer_alloc(d);
     libusb_fill_bulk_transfer(t->transfer, d->handle,
                               pipe_id, t->buffer, sizeof(t->buffer),
                               on_bulk_in_done, t, BULK_IN_TIMEOUT_MS);
-    submit_transfer(t);
+    return submit_transfer(t);
 }
 
 static void bulk_in_open(struct dev_s * d, struct jsdrvp_msg_s * msg) {
@@ -523,18 +708,38 @@ static void bulk_in_open(struct dev_s * d, struct jsdrvp_msg_s * msg) {
 
 static void bulk_in_close(struct dev_s * d, struct jsdrvp_msg_s * msg) {
     uint8_t ep = msg->extra.bkusb_stream.endpoint;
+    uint8_t pipe_id = ep | 0x80;  // bulk_in_open registers with the IN direction bit
     JSDRV_LOGI("bulk_in_close %d", (int) ep);
-    d->endpoint_mode[ep] = EP_MODE_OFF;
+    d->endpoint_mode[pipe_id] = EP_MODE_OFF;
     struct jsdrv_list_s * item;
     struct transfer_s * t;
     jsdrv_list_foreach_reverse(&d->transfers_pending, item) {
         t = JSDRV_CONTAINER_OF(item, struct transfer_s, item);
-        if (t->transfer->endpoint == ep) {
+        if (t->transfer->endpoint == pipe_id) {
             libusb_cancel_transfer(t->transfer);
         }
     }
     msg->value = jsdrv_union_i32(0);  // return code
     device_rsp(d, msg);
+}
+
+// Reclaim a stream-buffer loan returned by the upper layer: free the
+// loaned transfer (see on_bulk_in_done) and the message.
+static void stream_in_return_free(struct dev_s * d, struct jsdrvp_msg_s * msg) {
+    struct transfer_s * t;
+    if (JSDRV_UNION_BIN != msg->value.type) {
+        // Not a loaned stream buffer: CONTAINER_OF on a non-pointer
+        // value would reclaim a garbage transfer.  Mirrors the
+        // mb_device handle_rsp guard; unreachable today (upper layers
+        // only return real loans), kept as symmetric defense.
+        JSDRV_LOGW("stream_in return with non-bin type %d: drop",
+                   (int) msg->value.type);
+        jsdrvp_msg_free(d->backend->context, msg);
+        return;
+    }
+    t = JSDRV_CONTAINER_OF(msg->value.value.bin, struct transfer_s, buffer);
+    transfer_free(t);
+    jsdrvp_msg_free(d->backend->context, msg);
 }
 
 static bool device_handle_msg(struct dev_s * d, struct jsdrvp_msg_s * msg) {
@@ -546,10 +751,7 @@ static bool device_handle_msg(struct dev_s * d, struct jsdrvp_msg_s * msg) {
         JSDRV_LOGD3("device_handle_msg %s", msg->topic);
     }
     if (0 == strcmp(JSDRV_USBBK_MSG_STREAM_IN_DATA, msg->topic)) {
-        struct transfer_s * t;
-        t = JSDRV_CONTAINER_OF(msg->value.value.bin, struct transfer_s, buffer);
-        transfer_free(t);
-        jsdrvp_msg_free(d->backend->context, msg);
+        stream_in_return_free(d, msg);
     } else if (0 == strcmp(JSDRV_USBBK_MSG_BULK_OUT_DATA, msg->topic)) {
         bulk_out_send(d, msg);
     } else if (msg->topic[0] == JSDRV_MSG_COMMAND_PREFIX_CHAR) {
@@ -607,6 +809,7 @@ static void process_devices(struct backend_s * s) {
             msg = msg_queue_pop_immediate(d->ll_device.cmd_q);
             device_handle_msg(d, msg);
         } while (NULL != msg);
+        bulk_in_retry_process(d);
     }
     jsdrv_list_foreach(&s->devices_free, item) {
         d = JSDRV_CONTAINER_OF(item, struct dev_s, item);
@@ -615,9 +818,23 @@ static void process_devices(struct backend_s * s) {
             if (NULL == msg) {
                 break;
             }
-            JSDRV_LOGW("device closed, but message %s", msg->topic);
-            msg->value = jsdrv_union_i32(JSDRV_ERROR_CLOSED);
-            msg_queue_push(d->ll_device.rsp_q, msg);
+            if (0 == strcmp(JSDRV_USBBK_MSG_STREAM_IN_DATA, msg->topic)) {
+                // Stream-buffer loan returned after retirement: reclaim
+                // it here.  Echoing it with an error value would forge a
+                // STREAM_IN_DATA response whose value is not a buffer.
+                stream_in_return_free(d, msg);
+                continue;
+            }
+            // Any other message reached this cmd_q after the
+            // LL_TERMINATED sentinel was pushed (retirement precedes
+            // this drain), and every UL consumer stops draining rsp_q
+            // at that sentinel.  An echoed response would therefore
+            // never reach its intended consumer: it would dead-letter
+            // into the slot's next life (possibly a different physical
+            // device) as a spurious ACK/NACK.  Free it instead.
+            JSDRV_LOGW("retired device %s: drop message %s",
+                       d->ll_device.prefix, msg->topic);
+            jsdrvp_msg_free(s->context, msg);
         };
     }
 
@@ -657,6 +874,7 @@ static int32_t device_add(struct backend_s * s, libusb_device * usb_device, stru
             jsdrv_list_add_tail(&s->devices_active, &d->item);
             d->mode = DEVICE_MODE_CLOSED;
             device_add_announce(s, d);
+            s->rescan_remaining = 0;  // silent-death rescan found its device
             return 0;
         }
         ++dt;
@@ -695,6 +913,26 @@ static void device_remove_begin(struct backend_s * s, struct dev_s * d) {
     }
     if (d->mode == DEVICE_MODE_OPEN) {
         d->mode = DEVICE_MODE_CLOSING;
+    }
+}
+
+// Detect devices that died without a hotplug event: the NO_DEVICE
+// transfer-completion and submit-retry paths set DEVICE_MODE_UNASSIGNED
+// but cannot initiate removal from libusb callback context.  Convert
+// them to a normal removal here (thread context) and arm the timed
+// rescan, since no hotplug ARRIVED will ever re-announce the device.
+static void process_silent_removals(struct backend_s * s) {
+    struct jsdrv_list_s * item;
+    struct dev_s * d;
+    jsdrv_list_foreach(&s->devices_active, item) {
+        d = JSDRV_CONTAINER_OF(item, struct dev_s, item);
+        if ((d->mode == DEVICE_MODE_UNASSIGNED) && !d->removing) {
+            JSDRV_LOGI("silent device death (no hotplug): %s; remove + rescan",
+                       d->ll_device.prefix);
+            device_remove_begin(s, d);
+            s->rescan_remaining = RESCAN_COUNT;
+            s->rescan_at_ms = jsdrv_time_ms_u32() + RESCAN_INTERVAL_MS;
+        }
     }
 }
 
@@ -856,10 +1094,17 @@ static void device_close_all(struct backend_s * s) {
             device_close(d);
         }
     }
+    // bound the wait: a device that never goes idle (removed mid-transfer,
+    // wedged kernel driver) must not hang process exit forever.  WinUSB
+    // bounds its per-device thread joins at 10 seconds.
+    uint32_t t_start_ms = jsdrv_time_ms_u32();
     while (!are_all_devices_idle(s)) {
         libusb_handle_events_timeout_completed(s->ctx, &libusb_timeout_tv, NULL);
         handle_device_close(s);
-        // todo timeout?
+        if ((jsdrv_time_ms_u32() - t_start_ms) > 10000U) {
+            JSDRV_LOGE("device_close_all timed out; forcing close");
+            break;
+        }
     }
     for (uint32_t i = 0; i < DEVICES_MAX; ++i) {
         struct dev_s *d = &s->devices[i];
@@ -941,13 +1186,49 @@ void * backend_thread(void * arg) {
             JSDRV_LOG_CRITICAL("nfds too large");
         }
 
-        rc = poll(fds, nfds, 5000);
+        // poll() must not outlast a scheduled bulk IN retry, or the pipe stays
+        // dead until the next unrelated event wakes the thread.
+        int timeout_ms = 5000;
+        if (s->rescan_remaining) {
+            int32_t rescan_ms = (int32_t) (s->rescan_at_ms - jsdrv_time_ms_u32());
+            if (rescan_ms < 0) {
+                rescan_ms = 0;
+            }
+            if (rescan_ms < timeout_ms) {
+                timeout_ms = rescan_ms;
+            }
+        }
+        struct jsdrv_list_s * retry_item;
+        jsdrv_list_foreach(&s->devices_active, retry_item) {
+            struct dev_s * d = JSDRV_CONTAINER_OF(retry_item, struct dev_s, item);
+            if (0 == d->bulk_in_retry_delay_ms) {
+                continue;
+            }
+            int32_t remaining_ms = (int32_t) (d->bulk_in_retry_at_ms - jsdrv_time_ms_u32());
+            if (remaining_ms < 0) {
+                remaining_ms = 0;
+            }
+            if (remaining_ms < timeout_ms) {
+                timeout_ms = remaining_ms;
+            }
+        }
+
+        rc = poll(fds, nfds, timeout_ms);
         rc = libusb_handle_events_timeout_completed(s->ctx, &libusb_timeout_tv, NULL);
         while (handle_msg(s, msg_queue_pop_immediate(s->backend.cmd_q))) {
             ; //
         }
         process_devices(s);
+        process_silent_removals(s);
         if (fds[1].revents) {
+            handle_hotplug(s);
+        } else if (s->rescan_remaining
+                && (((int32_t) (jsdrv_time_ms_u32() - s->rescan_at_ms)) >= 0)) {
+            --s->rescan_remaining;
+            s->rescan_at_ms = jsdrv_time_ms_u32() + RESCAN_INTERVAL_MS;
+            if (0 == s->rescan_remaining) {
+                JSDRV_LOGI("silent-death rescan: giving up (device not found)");
+            }
             handle_hotplug(s);
         }
         handle_device_close(s);

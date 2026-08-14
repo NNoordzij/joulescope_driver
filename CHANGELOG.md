@@ -4,6 +4,265 @@
 This file contains the list of changes made to the Joulescope driver.
 
 
+## 2.4.1
+
+2026 Aug 7 [in progress]
+
+* Added JS320 support to "pyjoulescope_driver measure".
+* Added "metadata" entry point to pyjoulescope_driver.
+* Fixed metadata parsing.
+
+
+## 2.4.0
+
+2026 Aug 4
+
+* Performed a full design review focused on incomplete and partially
+  complete features; findings and remaining work are tracked in
+  doc/plans/design_review_2026-07.md.
+* Repurposed jsdrv_statistics_s reserved rsv3_u32 as decimate_factor32.
+  The u8 decimate_factor truncated for JS320 (e.g. 256 -> 0) and now
+  saturates at 255; consumers should prefer decimate_factor32 and fall
+  back to decimate_factor when it reads 0 (older producers).
+* Fixed memory buffer (stream buffer) issues.
+  * Fixed process abort when buffering signals with unsupported element
+    types (JS320 s/adc/N/!data INT32, s/uart/!data UINT8); the signal is
+    now rejected gracefully and removed from the signal list.
+  * Fixed u1/u4 write path bit alignment: message lengths that left the
+    ring at a sub-byte offset silently corrupted all subsequent samples.
+  * Fixed skip-fill zero fill, which mixed sample and byte units.
+  * Bounded time map growth over long captures: expiration now runs as
+    the ring wraps (previously unbounded with an O(N) copy per message).
+  * Implemented the documented g/hold clear on the 1 -> 0 transition.
+  * Fixed request pool leak on failed requests and the finalize
+    off-by-one that leaked buffer id 16's thread on shutdown.
+* Fixed JS220 issues.
+  * Fixed h/i_scale and h/v_scale, which were broken: the
+    metadata published without the $ suffix (JSON became the retained
+    value) and the handler read the unconverted union value.
+  * Rejected h/fs=0 and h/fp=0 (divide-by-zero) and invalid h/filter
+    values; sinc1 now rejects on firmware/FPGA < 1.3.0 instead of
+    desynchronizing host and instrument decimation.
+  * h/fs coercion (sinc1 signal_n 2/3 forced to 4) now logs and
+    republishes the actual rate.
+* Fixed JS110 issues.
+  * Fixed statistics max initialization (-FLT_MAX, not FLT_MIN), which
+    reported max ~0 for always-negative signals; all-NaN blocks now
+    report NaN instead of dividing by zero; rejected s/stats/scnt=0.
+  * Fixed NaN current-range suppression to NaN exactly the window
+    samples (previously 2*window+post, including the samples the
+    mean/interp estimates depend on).
+  * Restored missing-sample fill on USB packet skips (up to 512 frames)
+    so sample_id, the time map, and statistics stay wall-clock aligned.
+  * Validated the current-range suppression parameters against the
+    sample processor limits.
+* Fixed JS320 issues.
+  * Rejected s/dwnN/N above the 1000 register maximum and
+    s/gpi/+/dwnN/mode above 3.
+  * Rejected statistics messages with decimate=0 (divide-by-zero).
+* Fixed C core issues.
+  * Fixed log level name table (missing commas): levels 5-8 reported
+    wrong names and 9-10 returned NULL.
+  * Fixed jsdrv_union_value_to_str for f32/f64/null (wrote nothing,
+    leaving log buffers uninitialized) and u64/i64 (truncated to 32-bit).
+  * Fixed jsdrv_union_as_type f64 conversions, which rejected all
+    negative values for signed targets and limited u64/i64 to 32-bit.
+  * jsdrv_union_eq now compares STDMSG/FRAME payloads (pubsub
+    deduplication never applied to them).
+  * Hardened JSON parsing: literals are now actually compared ("txyz"
+    parsed as true), integers parse to i64 with overflow rejection, and
+    nesting depth is bounded (metadata is untrusted device input).
+  * Fixed metadata range parsing buffer overflow on malformed ranges.
+  * Fixed frontend NULL dereference when subscribing to a removed
+    device, and a dangling device list node on factory failure.
+* Fixed backend and mb_device issues.
+  * Bounded the libusb shutdown wait at 10 s (previously could hang
+    process exit forever if a device never went idle).
+  * Fixed libusb bulk_in_close endpoint id mismatch (latent).
+  * POSIX driver threads now sleep for the scheduled timeout instead of
+    busy-polling every 2 ms.
+  * Fixed POSIX msg_queue_pop_immediate, which reset the wakeup event
+    while later messages remained queued.  A burst of two or more
+    responses stranded the tail until the next push or timeout; once
+    the 2 ms busy-poll no longer masked it, this caused ~1 s stalls,
+    JS220 open timeouts, and close() returning JSDRV_ERROR_TIMED_OUT
+    after fire-and-forget publishes (issue #13's remaining symptom).
+    Now matches the WinUSB queue: reset only when the queue empties.
+    Added msg_queue_test.
+  * POSIX event pipe: the signal end is now nonblocking and reset
+    drains until empty.  Sustained streaming wrote one wakeup byte per
+    msg_queue_push while resets ran only when a queue emptied, so the
+    pipe could fill (64 KiB) and a blocking write then wedged the
+    producer -- the libusb backend thread -- stalling every device
+    until the instrument's host-silence watchdog rebooted it.  Dropped
+    writes on a full pipe are safe: the pipe is already poll-readable.
+    Added a regression test.
+  * libusb now issues a bulk OUT clear_halt on the first OUT of each
+    open session, and WinUSB resets the bulk OUT pipe on first use per
+    open (Windows HIL validation pending).  This re-synchronizes the
+    device's data toggle for fielded firmware with the stub
+    SET_INTERFACE handler (fixed in MiniBitty 2026-08), which otherwise
+    hardware-discarded the session's first OUT packet as a duplicate,
+    costing one 250 ms link retransmit per open (measured raw-open
+    worst case 258 ms -> 8.3 ms on NUCLEO-C542RC with old firmware).
+  * mb_device now answers device-initiated link PINGs with PONG and
+    rejects device publishes with JSDRV_ERROR_CLOSED while not open.
+  * Fixed host process abort (exit from JSDRV_ASSERT) when a
+    MiniBitty-link device died mid-stream and re-enumerated: the libusb
+    retired-slot drain echoed returned stream-buffer loans back as
+    STREAM_IN_DATA messages with an i32 error value, and mb_device kept
+    draining past the LL_TERMINATED sentinel into the forged message.
+    The drain now reclaims loans (also fixing a transfer leak),
+    mb_device stops at the sentinel like js110/js220, and non-BIN
+    STREAM_IN_DATA messages are dropped instead of asserted fatal
+    (guard now also in js110/js220 and the libusb loan-reclaim path).
+    The retired-slot drain now frees other late messages instead of
+    echoing error responses that could only dead-letter into the
+    slot's next session behind the sentinel.
+* Fixed pyjoulescope_driver issues.
+  * Fixed Record for u1/u4 signals (current_range, gpi, trigger_in):
+    only fsr_f32 was ever called, so these recorded garbage.
+  * Fixed Record multi-device open, which subscribed every signal once
+    per device and duplicated every JLS write; close() is now
+    idempotent.  Added record round-trip unit tests.
+  * statistics CLI now supports the JS320; measure CLI returns a
+    consistent dict, supports the JS110, and survives early interrupt;
+    info CLI reports JS320 versions; threads CLI filters to JS220.
+  * Exported TimeMap; corrected the open 'defaults' docstring to the
+    2026-06 semantics.
+* Fixed node_api issues.
+  * Implemented the stream buffer info/response converters, which
+    returned undefined; unknown binary payloads now convert to
+    Uint8Array.
+  * Fixed the test to actually fail on error and run it in CI.
+* Removed the dead src/emu.c / src/emulated.c skeleton (never compiled);
+  a fresh emulated-device design is proposed in
+  doc/plans/emulated_device.md.
+* Registered dbc_test and boot_info_test with ctest; removed the dead
+  test_invariant_tmap.c.
+* Fixed pytest suite errors.
+  * Updated embed_js320_firmware tests to the released list-format
+    index.json (the tool moved to it in 2.0.7); the tool now reports
+    the friendly error for an empty index instead of IndexError.
+  * Excluded the standalone test/hw scripts from pytest collection;
+    run them directly with JSDRV_HW_DEVICE set.
+* Fixed README Python requirement (3.12+) and published the JS220 topic
+  reference and JS320 calibration/firmware-update docs on the docs site.
+
+
+## 2.3.5
+
+2026 Jul 31
+
+* Fixed JS320 h/fs downsampling.
+  * Remove 2000000 default, which is unsupported.
+  * Added host-side downsampling for < 1 kHz: instrument decimates to
+    1 kHz, host applies a sincN filter matched to s/dwnN/mode.
+  * Track s/dwnN/mode; bypass now reports the true decimate_factor.
+* Fixed Minibitty adapter Tracy integration for trace.
+* Fixed mb_device to ack close requests while already closed, so
+  jsdrv_close() completes instead of timing out.
+
+
+## 2.3.4
+
+2026 Jul 17
+
+* Fixed host sleep/resume recovery on Linux (and unclean-close recovery
+  on all platforms).
+  * Fixed mb_device open-time `!state` restore: full SET_CMD chunks
+    exceeded the frame payload limit after the publish wrapper was added
+    and were silently dropped, so device state leaked from a prior
+    session survived open.  This caused the "only power displays until a
+    second restart" symptom after an unclean session end.  Oversized
+    publishes now log an error instead of vanishing.
+  * libusb backend: a device that dies without a hotplug event (Linux
+    reset-resume after host sleep force-unbinds usbfs; no LEFT/ARRIVED
+    fires) is now torn down properly and re-discovered by a bounded
+    timed rescan, so clients can reconnect without an app restart.
+  * mb_device link-silence supervision: sustained RX silence while the
+    keep-alive is active now triggers the same link revalidation and
+    handshake replay as the Windows host-resume power event, recovering
+    a session whose device link was wiped by a resume bus reset.  This
+    is OS-agnostic and also covers macOS sleep.  `h/link/keep=0`
+    disables it together with the keep-alive.
+  * Host-crash recovery is unchanged: a killed host with an active bus
+    still causes the device comm-watchdog reset and re-enumeration.
+* Added `jsdrv stream_watch` example: watch i/v/p streams and log
+  per-second JSON evidence for sleep/resume and recovery testing.
+* Added mb_device unit tests (state chunking, silence supervision).
+
+
+## 2.3.2
+
+2026 Jul 15
+
+* Fixed USB suspend/resume handling.
+  * mb_device announces host SLEEP_REQ so the firmware can
+    release its host-inactivity watchdog.
+  * Add PING keepalive.
+  * winusb backend forwards WM_POWERBROADCAST suspend/resume to open devices.
+  * mb_device revalidates the link on resume (ping) 
+    handshake when the device re-enumerated (Windows resets the bus on
+    resume from S3), restoring streaming without a close/reopen.
+  * Bundled JS320 firmware 1.1.5, which supports SLEEP_REQ.
+* Added `--timeout` option to the minibitty stream example and made its
+  no-data monitor host-sleep aware (measures post-wake stream recovery).
+
+
+## 2.3.0
+
+2026 Jun 26
+
+* Fixed current reading stuck at ±2.2A max on some JS320 units.
+  * Bumped JS320 from 1.1.2 to 1.1.3 which
+    reduced current overflow from almost 100% to 95% of ADC max.
+* Dropped support for Python 3.11 and earlier.  See
+ [NEP 29](https://numpy.org/neps/nep-0029-deprecation_policy.html).
+
+
+## 2.2.12
+
+2026 Jun 18
+
+* Fixed occasional 1 sample glitch on JS320 current autoranging.
+  * Bumped JS320 from 1.1.1 to 1.1.2
+
+
+## 2.2.11
+
+2026 Jun 18
+
+* Force s/dwnN/N 2 & 3 to 4.
+* Fixed JS320 open race condition.
+* Fixed JS320 current and voltage scaling.
+* Added missing tmap bounds check.
+* Bumped node.js package lock versions.
+
+
+## 2.2.10
+
+2026 Jun 17
+
+* Fixed state synchronization on device open.
+* Bumped JS320 firmware to 1.1.1.
+* Added host topic metadata.
+
+
+## 2.2.9
+
+2026 Jun 15
+
+* Migrated GitHub action to use "Visual Studio 18 2026"
+
+
+## 2.2.8
+
+2026 Jun 14
+
+* Bumped JS320 firmware to 1.0.7.
+
+
 ## 2.2.7
 
 2026 Jun 9

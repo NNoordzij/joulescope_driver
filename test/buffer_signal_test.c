@@ -68,6 +68,38 @@ static void test_initialize_finalize(void **state) {
     jsdrv_bufsig_free(&b);
 }
 
+static void test_element_type_support(void **state) {
+    (void) state;
+    assert_true(jsdrv_bufsig_element_type_is_supported(JSDRV_DATA_TYPE_FLOAT, 32));
+    assert_true(jsdrv_bufsig_element_type_is_supported(JSDRV_DATA_TYPE_UINT, 1));
+    assert_true(jsdrv_bufsig_element_type_is_supported(JSDRV_DATA_TYPE_UINT, 4));
+    assert_false(jsdrv_bufsig_element_type_is_supported(JSDRV_DATA_TYPE_FLOAT, 64));
+    assert_false(jsdrv_bufsig_element_type_is_supported(JSDRV_DATA_TYPE_INT, 32));
+    assert_false(jsdrv_bufsig_element_type_is_supported(JSDRV_DATA_TYPE_UINT, 8));
+    assert_false(jsdrv_bufsig_element_type_is_supported(JSDRV_DATA_TYPE_UNDEFINED, 32));
+}
+
+static void test_alloc_unsupported_element_type(void **state) {
+    (void) state;
+    struct bufsig_s b;
+    memset(&b, 0, sizeof(b));
+    jsdrv_cstr_copy(b.topic, SRC_TOPIC, sizeof(b.topic));
+    b.hdr.field_id = JSDRV_FIELD_RAW;
+    b.hdr.element_type = JSDRV_DATA_TYPE_INT;    // JS320 s/adc/N/!data
+    b.hdr.element_size_bits = 32;
+    b.hdr.decimate_factor = 1;
+    b.hdr.sample_rate = 1000000;
+    b.active = true;
+    assert_int_equal(JSDRV_ERROR_NOT_SUPPORTED, jsdrv_bufsig_alloc(&b, 1000000, 10, 10));
+    assert_null(b.level0_data);
+
+    b.hdr.element_type = JSDRV_DATA_TYPE_UINT;   // JS320 s/uart/!data
+    b.hdr.element_size_bits = 8;
+    assert_int_equal(JSDRV_ERROR_NOT_SUPPORTED, jsdrv_bufsig_alloc(&b, 1000000, 10, 10));
+    assert_null(b.level0_data);
+    jsdrv_bufsig_free(&b);
+}
+
 static void insert_samples(struct bufsig_s * b, uint64_t sample_id_start, uint32_t length) {
     struct jsdrv_stream_signal_s s;
     memset(&s, 0, sizeof(s));
@@ -128,6 +160,173 @@ static void insert_const_samples(struct bufsig_s * b, uint64_t sample_id_start, 
         f32[i] = value;
     }
     jsdrv_bufsig_recv_data(b, &s);
+}
+
+static void bufsig_init_uint(struct bufsig_s * b, uint8_t bits) {
+    memset(b, 0, sizeof(*b));
+    jsdrv_cstr_copy(b->topic, SRC_TOPIC, sizeof(b->topic));
+    b->hdr.field_id = JSDRV_FIELD_GPI;
+    b->hdr.index = 0;
+    b->hdr.element_type = JSDRV_DATA_TYPE_UINT;
+    b->hdr.element_size_bits = bits;
+    b->hdr.decimate_factor = 1;
+    b->hdr.sample_rate = 1000000;
+    b->tmap = NULL;
+    b->active = true;
+    assert_int_equal(0, jsdrv_bufsig_alloc(b, 1000000, 1024, 32));
+}
+
+static uint8_t uint_pattern(uint64_t sample_id, uint8_t bits) {
+    uint64_t x = sample_id * 0x9E3779B97F4A7C15ULL;
+    return (uint8_t) ((x >> 32) & ((1U << bits) - 1U));
+}
+
+static void insert_samples_uint(struct bufsig_s * b, uint8_t bits, uint64_t sample_id_start, uint32_t length) {
+    struct jsdrv_stream_signal_s s;
+    memset(&s, 0, sizeof(s));
+    s.sample_id = sample_id_start;
+    s.field_id = JSDRV_FIELD_GPI;
+    s.index = 0;
+    s.element_type = JSDRV_DATA_TYPE_UINT;
+    s.element_size_bits = bits;
+    s.element_count = length;
+    s.sample_rate = 1000000;
+    s.decimate_factor = 1;
+    s.time_map.offset_time = JSDRV_TIME_HOUR;
+    s.time_map.counter_rate = s.sample_rate;
+    s.time_map.offset_counter = 0;
+    for (uint32_t i = 0; i < length; ++i) {
+        uint64_t bit = (uint64_t) i * bits;
+        s.data[bit >> 3] |= (uint8_t) (uint_pattern(sample_id_start + i, bits) << (bit & 7));
+    }
+    jsdrv_bufsig_recv_data(b, &s);
+}
+
+static uint8_t rsp_uint_get(struct jsdrv_buffer_response_s * rsp, uint8_t bits, uint64_t idx) {
+    uint8_t * data = (uint8_t *) rsp->data;
+    uint64_t bit = idx * bits;
+    return (data[bit >> 3] >> (bit & 7)) & ((1U << bits) - 1U);
+}
+
+static void check_samples_uint(struct bufsig_s * b, uint8_t bits, uint64_t start, uint64_t length) {
+    struct jsdrv_buffer_request_s req;
+    memset(&req, 0, sizeof(req));
+    req.version = 1;
+    req.time_type = JSDRV_TIME_SAMPLES;
+    req.time.samples.start = start;
+    req.time.samples.length = length;
+    uint64_t rsp_u64[1 << 12];
+    struct jsdrv_buffer_response_s * rsp = (struct jsdrv_buffer_response_s *) rsp_u64;
+    assert_int_equal(0, jsdrv_bufsig_process_request(b, &req, rsp));
+    assert_int_equal(JSDRV_BUFFER_RESPONSE_SAMPLES, rsp->response_type);
+    assert_int_equal(length, rsp->info.time_range_samples.length);
+    for (uint64_t i = 0; i < length; ++i) {
+        assert_int_equal(uint_pattern(start + i, bits), rsp_uint_get(rsp, bits, i));
+    }
+}
+
+// Write path with message lengths that leave the ring head at arbitrary
+// bit offsets; the read path already handled offsets, the write path
+// previously truncated to a byte boundary.
+static void test_samples_u1_unaligned_writes(void **state) {
+    (void) state;
+    struct bufsig_s b;
+    bufsig_init_uint(&b, 1);
+    static const uint32_t lengths[] = {13, 11, 7, 64, 5, 900, 3};
+    uint64_t sample_id = 1000;
+    for (size_t i = 0; i < sizeof(lengths) / sizeof(lengths[0]); ++i) {
+        insert_samples_uint(&b, 1, sample_id, lengths[i]);
+        sample_id += lengths[i];
+    }
+    check_samples_uint(&b, 1, 1000, sample_id - 1000);
+    jsdrv_bufsig_free(&b);
+}
+
+static void test_samples_u4_unaligned_writes(void **state) {
+    (void) state;
+    struct bufsig_s b;
+    bufsig_init_uint(&b, 4);
+    static const uint32_t lengths[] = {3, 5, 1, 128, 7, 901};
+    uint64_t sample_id = 1000;
+    for (size_t i = 0; i < sizeof(lengths) / sizeof(lengths[0]); ++i) {
+        insert_samples_uint(&b, 4, sample_id, lengths[i]);
+        sample_id += lengths[i];
+    }
+    check_samples_uint(&b, 4, 1000, sample_id - 1000);
+    jsdrv_bufsig_free(&b);
+}
+
+// A skip fills with zeros; the fill previously mixed byte and sample units.
+static void test_samples_u1_skip_fill(void **state) {
+    (void) state;
+    struct bufsig_s b;
+    bufsig_init_uint(&b, 1);
+    insert_samples_uint(&b, 1, 1000, 10);
+    insert_samples_uint(&b, 1, 1017, 9);  // skip samples 1010-1016
+    struct jsdrv_buffer_request_s req;
+    memset(&req, 0, sizeof(req));
+    req.version = 1;
+    req.time_type = JSDRV_TIME_SAMPLES;
+    req.time.samples.start = 1000;
+    req.time.samples.length = 26;
+    uint64_t rsp_u64[1 << 12];
+    struct jsdrv_buffer_response_s * rsp = (struct jsdrv_buffer_response_s *) rsp_u64;
+    assert_int_equal(0, jsdrv_bufsig_process_request(&b, &req, rsp));
+    assert_int_equal(26, rsp->info.time_range_samples.length);
+    for (uint64_t i = 0; i < 26; ++i) {
+        uint64_t sample_id = 1000 + i;
+        uint8_t expect;
+        if ((sample_id >= 1010) && (sample_id < 1017)) {
+            expect = 0;  // skipped samples fill with zeros
+        } else {
+            expect = uint_pattern(sample_id, 1);
+        }
+        assert_int_equal(expect, rsp_uint_get(rsp, 1, i));
+    }
+    jsdrv_bufsig_free(&b);
+}
+
+static void insert_samples_time_mapped(struct bufsig_s * b, uint64_t sample_id_start, uint32_t length) {
+    // like insert_samples, but with a per-message time map so each
+    // message adds a distinct tmap entry (no deduplication)
+    struct jsdrv_stream_signal_s s;
+    memset(&s, 0, sizeof(s));
+    s.sample_id = sample_id_start;
+    s.field_id = JSDRV_FIELD_CURRENT;
+    s.index = 7;
+    s.element_type = JSDRV_DATA_TYPE_FLOAT;
+    s.element_size_bits = 32;
+    s.element_count = length;
+    s.sample_rate = 1000000;
+    s.decimate_factor = 1;
+    s.time_map.offset_time = JSDRV_TIME_HOUR
+            + (int64_t) ((sample_id_start * (uint64_t) JSDRV_TIME_SECOND) / 1000000LLU);
+    s.time_map.counter_rate = s.sample_rate;
+    s.time_map.offset_counter = sample_id_start;
+    float * f32 = (float *) s.data;
+    for (uint32_t i = 0; i < s.element_count; ++i) {
+        f32[i] = 0.0f;
+    }
+    jsdrv_bufsig_recv_data(b, &s);
+}
+
+static void test_tmap_bounded_over_long_capture(void **state) {
+    // the ring buffer holds 1e6 samples; streaming 4e6 samples with a
+    // changing time map must not grow the tmap without bound
+    initialize();
+    uint32_t length = 1000;
+    uint64_t sample_id = 0;
+    for (; sample_id < 4000000LLU; sample_id += length) {
+        insert_samples_time_mapped(&b, sample_id, length);
+    }
+    struct jsdrv_buffer_info_s info;
+    memset(&info, 0, sizeof(info));
+    assert_true(jsdrv_bufsig_info(&b, &info));
+    // ~1000 entries cover the 1e6 sample buffer; without expiration this
+    // would be ~4000 and keep growing forever
+    assert_true(jsdrv_tmap_length(info.tmap) <= 1100);
+    jsdrv_tmap_free(info.tmap);
+    jsdrv_bufsig_free(&b);
 }
 
 static void test_samples_start_length(void **state) {
@@ -580,6 +779,12 @@ static void test_summary_integration_accuracy(void **state) {
 int main(void) {
     const struct CMUnitTest tests[] = {
             cmocka_unit_test(test_initialize_finalize),
+            cmocka_unit_test(test_element_type_support),
+            cmocka_unit_test(test_alloc_unsupported_element_type),
+            cmocka_unit_test(test_samples_u1_unaligned_writes),
+            cmocka_unit_test(test_samples_u4_unaligned_writes),
+            cmocka_unit_test(test_samples_u1_skip_fill),
+            cmocka_unit_test(test_tmap_bounded_over_long_capture),
             cmocka_unit_test(test_samples_start_length),
             cmocka_unit_test(test_samples_start_end),
             cmocka_unit_test(test_samples_all),

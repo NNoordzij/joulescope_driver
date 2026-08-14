@@ -12,6 +12,7 @@
         '../src/cstr.c',
         '../src/devices.c',
         '../src/downsample.c',
+        '../src/downsample_sinc.c',
         '../src/error_code.c',
         '../src/devices/js110/js110_cal.c',
         '../src/devices/js110/js110_sample_processor.c',

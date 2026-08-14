@@ -31,18 +31,27 @@ def _index(size, digest, version=(0, 4, 3),
            path='js320-0_4_3.zip',
            changelog='js320-0_4_3_CHANGELOG.md',
            timestamp='2026-04-22T00:00:00Z'):
-    return {
-        'js320': {
-            'stable': {
-                'version': list(version),
-                'path': path,
-                'size': size,
-                'sha256': digest,
-                'changelog': changelog,
-                'timestamp': timestamp,
-            }
-        }
-    }
+    # download.joulescope.com serves a list of releases, newest first;
+    # the tool embeds entry [0].  Include an older release behind it so
+    # the tests prove newest-first selection.
+    return [
+        {
+            'version': list(version),
+            'path': path,
+            'size': size,
+            'sha256': digest,
+            'changelog': changelog,
+            'timestamp': timestamp,
+        },
+        {
+            'version': [0, 0, 1],
+            'path': 'js320-0_0_1.zip',
+            'size': 1,
+            'sha256': 'stale',
+            'changelog': 'js320-0_0_1_CHANGELOG.md',
+            'timestamp': '2026-01-01T00:00:00Z',
+        },
+    ]
 
 
 class _FakeHttp:
@@ -84,7 +93,7 @@ class TestFetchIndex(unittest.TestCase):
         http = _FakeHttp({INDEX_URL: json.dumps(payload).encode('utf-8')})
         with mock.patch('urllib.request.urlopen', http):
             got = embed.fetch_index(INDEX_URL)
-        self.assertEqual(got['js320']['stable']['version'], [0, 4, 3])
+        self.assertEqual(got[0]['version'], [0, 4, 3])
 
 
 class TestFetchImage(unittest.TestCase):
@@ -92,7 +101,7 @@ class TestFetchImage(unittest.TestCase):
     def test_success(self):
         data = b'hello world firmware'
         digest = hashlib.sha256(data).hexdigest()
-        entry = _index(len(data), digest)['js320']['stable']
+        entry = _index(len(data), digest)[0]
         http = _FakeHttp({IMAGE_URL: data})
         with mock.patch('urllib.request.urlopen', http):
             got, url = embed.fetch_image(INDEX_URL, entry)
@@ -101,7 +110,7 @@ class TestFetchImage(unittest.TestCase):
 
     def test_sha256_mismatch_raises(self):
         data = b'bytes'
-        entry = _index(len(data), 'wrong-digest')['js320']['stable']
+        entry = _index(len(data), 'wrong-digest')[0]
         http = _FakeHttp({IMAGE_URL: data})
         with mock.patch('urllib.request.urlopen', http):
             with self.assertRaisesRegex(RuntimeError, 'sha256 mismatch'):
@@ -109,7 +118,7 @@ class TestFetchImage(unittest.TestCase):
 
     def test_size_mismatch_raises(self):
         data = b'five!'
-        entry = _index(999, hashlib.sha256(data).hexdigest())['js320']['stable']
+        entry = _index(999, hashlib.sha256(data).hexdigest())[0]
         http = _FakeHttp({IMAGE_URL: data})
         with mock.patch('urllib.request.urlopen', http):
             with self.assertRaisesRegex(RuntimeError, 'size mismatch'):
@@ -302,9 +311,9 @@ class TestMainEndToEnd(unittest.TestCase):
         with self.assertRaises(ValueError):
             embed.parse_version('v1.2.3')
 
-    def test_missing_stable_entry_raises(self):
+    def test_empty_index_raises(self):
         http = _FakeHttp({
-            INDEX_URL: json.dumps({'js320': {}}).encode('utf-8'),
+            INDEX_URL: json.dumps([]).encode('utf-8'),
         })
         argv = ['embed', '--index-url', INDEX_URL]
         with mock.patch('urllib.request.urlopen', http), \

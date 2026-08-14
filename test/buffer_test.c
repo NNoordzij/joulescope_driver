@@ -380,6 +380,148 @@ static struct jsdrvp_msg_s * generate_msg_data_i(struct jsdrv_context_s * contex
     return msg;
 }
 
+static struct jsdrvp_msg_s * generate_msg_data_adc(struct jsdrv_context_s * context, uint64_t sample_id, uint32_t length) {
+    struct jsdrvp_msg_s * msg = jsdrvp_msg_alloc_data(context, "u/js320/0123456/s/adc/0/!data");
+    struct jsdrv_stream_signal_s * s = (struct jsdrv_stream_signal_s *) msg->value.value.bin;
+    s->sample_id = sample_id;
+    s->field_id = JSDRV_FIELD_RAW;
+    s->index = 0;
+    s->element_type = JSDRV_DATA_TYPE_INT;
+    s->element_size_bits = 32;
+    s->element_count = length;
+    s->sample_rate = 1000000;
+    s->decimate_factor = 1;
+    int32_t * sdata = (int32_t *) s->data;
+    for (uint32_t i = 0; i < s->element_count; ++i) {
+        sdata[i] = (int32_t) (sample_id + i);
+    }
+    return msg;
+}
+
+static void test_unsupported_element_type_removes_signal(void **state) {
+    // An INT/32 signal (JS320 raw ADC) cannot be buffered; verify the
+    // buffer rejects it gracefully instead of aborting the process.
+    (void) state;
+    struct jsdrvp_msg_s * msg;
+    const uint8_t buffer_id = 3;
+    const uint8_t signal_id = 5;
+    uint8_t ex_list_buffer1[] = {buffer_id, 0};
+    uint8_t ex_list_sig0[] = {0};
+    uint8_t ex_list_sig1[] = {signal_id, 0};
+
+    struct jsdrv_context_s * context = initialize();
+    publish(context, jsdrvp_msg_alloc_value(context, JSDRV_BUFFER_MGR_MSG_ACTION_ADD, &jsdrv_union_u8(buffer_id)));
+    expect_subscribe("m/003");
+    msg_send_process_next(context, TIMEOUT_MS);
+    expect_buf_list(ex_list_buffer1, sizeof(ex_list_buffer1));
+    msg_send_process_next(context, TIMEOUT_MS);
+
+    // Add signal
+    msg = jsdrvp_msg_alloc_value(context, "", &jsdrv_union_u8(signal_id));
+    tfp_snprintf(msg->topic, sizeof(msg->topic), "m/%03u/%s", buffer_id, JSDRV_BUFFER_MSG_ACTION_SIGNAL_ADD);
+    publish(context, msg);
+    expect_sig_list(ex_list_sig1, sizeof(ex_list_sig1));
+    msg_send_process_next(context, TIMEOUT_MS);
+
+    // and set source topic
+    msg = jsdrvp_msg_alloc_value(context, "", &jsdrv_union_str("u/js320/0123456/s/adc/0/!data"));
+    tfp_snprintf(msg->topic, sizeof(msg->topic), "m/%03u/s/%03u/topic", buffer_id, signal_id);
+    publish(context, msg);
+    expect_subscribe("u/js320/0123456/s/adc/0/!data");
+    msg_send_process_next(context, TIMEOUT_MS);
+
+    // set buffer size
+    msg = jsdrvp_msg_alloc_value(context, "", &jsdrv_union_u64(1000000LLU));
+    tfp_snprintf(msg->topic, sizeof(msg->topic), "m/%03u/%s", buffer_id, JSDRV_BUFFER_MSG_SIZE);
+    publish(context, msg);
+
+    // first data frame triggers buffer_alloc, which must reject the
+    // unsupported element type: unsubscribe and publish the empty signal list
+    msg = generate_msg_data_adc(context, 10000LLU, 100);
+    publish(context, msg);
+    expect_unsubscribe("u/js320/0123456/s/adc/0/!data");
+    msg_send_process_next(context, TIMEOUT_MS);
+    expect_sig_list(ex_list_sig0, sizeof(ex_list_sig0));
+    msg_send_process_next(context, TIMEOUT_MS);
+
+    // tear down
+    publish(context, jsdrvp_msg_alloc_value(context, JSDRV_BUFFER_MGR_MSG_ACTION_REMOVE, &jsdrv_union_u8(buffer_id)));
+    expect_unsubscribe("m/003");
+    msg_send_process_next(context, TIMEOUT_MS);
+    uint8_t ex_list_buffer0[] = {0};
+    expect_buf_list(ex_list_buffer0, sizeof(ex_list_buffer0));
+    msg_send_process_next(context, TIMEOUT_MS);
+    finalize(context);
+}
+
+static void test_hold_release_clears(void **state) {
+    // g/hold documented behavior: hold on 1, drop incoming data, clear on 1->0.
+    (void) state;
+    struct jsdrvp_msg_s * msg;
+    const uint8_t buffer_id = 3;
+    const uint8_t signal_id = 5;
+    uint8_t ex_list_buffer0[] = {0};
+    uint8_t ex_list_buffer1[] = {buffer_id, 0};
+    uint8_t ex_list_sig1[] = {signal_id, 0};
+
+    struct jsdrv_context_s * context = initialize();
+    publish(context, jsdrvp_msg_alloc_value(context, JSDRV_BUFFER_MGR_MSG_ACTION_ADD, &jsdrv_union_u8(buffer_id)));
+    expect_subscribe("m/003");
+    msg_send_process_next(context, TIMEOUT_MS);
+    expect_buf_list(ex_list_buffer1, sizeof(ex_list_buffer1));
+    msg_send_process_next(context, TIMEOUT_MS);
+
+    msg = jsdrvp_msg_alloc_value(context, "", &jsdrv_union_u8(signal_id));
+    tfp_snprintf(msg->topic, sizeof(msg->topic), "m/%03u/%s", buffer_id, JSDRV_BUFFER_MSG_ACTION_SIGNAL_ADD);
+    publish(context, msg);
+    expect_sig_list(ex_list_sig1, sizeof(ex_list_sig1));
+    msg_send_process_next(context, TIMEOUT_MS);
+
+    msg = jsdrvp_msg_alloc_value(context, "", &jsdrv_union_str("u/js220/0123456/s/i/!data"));
+    tfp_snprintf(msg->topic, sizeof(msg->topic), "m/%03u/s/%03u/topic", buffer_id, signal_id);
+    publish(context, msg);
+    expect_subscribe("u/js220/0123456/s/i/!data");
+    msg_send_process_next(context, TIMEOUT_MS);
+
+    msg = jsdrvp_msg_alloc_value(context, "", &jsdrv_union_u64(1000000LLU));
+    tfp_snprintf(msg->topic, sizeof(msg->topic), "m/%03u/%s", buffer_id, JSDRV_BUFFER_MSG_SIZE);
+    publish(context, msg);
+
+    msg = generate_msg_data_i(context, 10000LLU, 100);
+    publish(context, msg);
+    expect_info_any("m/003/s/005/info");
+    msg_send_process_next(context, TIMEOUT_MS);
+
+    // hold on (data published while held is dropped by _buffer_recv_data;
+    // not exercised here to avoid racing the buffer thread)
+    msg = jsdrvp_msg_alloc_value(context, "", &jsdrv_union_u8(1));
+    tfp_snprintf(msg->topic, sizeof(msg->topic), "m/%03u/%s", buffer_id, JSDRV_BUFFER_MSG_HOLD);
+    publish(context, msg);
+
+    // hold off: 1 -> 0 must clear the buffer (publishes cleared info)
+    msg = jsdrvp_msg_alloc_value(context, "", &jsdrv_union_u8(0));
+    tfp_snprintf(msg->topic, sizeof(msg->topic), "m/%03u/%s", buffer_id, JSDRV_BUFFER_MSG_HOLD);
+    publish(context, msg);
+    expect_info_any("m/003/s/005/info");
+    msg_send_process_next(context, TIMEOUT_MS);
+
+    // new data reallocates and resumes
+    msg = generate_msg_data_i(context, 20000LLU, 100);
+    publish(context, msg);
+    expect_info_any("m/003/s/005/info");
+    msg_send_process_next(context, TIMEOUT_MS);
+
+    // tear down; the buffer thread exit path unsubscribes the signal topic
+    publish(context, jsdrvp_msg_alloc_value(context, JSDRV_BUFFER_MGR_MSG_ACTION_REMOVE, &jsdrv_union_u8(buffer_id)));
+    expect_unsubscribe("m/003");
+    msg_send_process_next(context, TIMEOUT_MS);
+    expect_unsubscribe("u/js220/0123456/s/i/!data");
+    msg_send_process_next(context, TIMEOUT_MS);
+    expect_buf_list(ex_list_buffer0, sizeof(ex_list_buffer0));
+    msg_send_process_next(context, TIMEOUT_MS);
+    finalize(context);
+}
+
 static void test_one_signal(void **state) {
     (void) state;
     struct jsdrvp_msg_s * msg;
@@ -481,6 +623,8 @@ int main(void) {
     const struct CMUnitTest tests[] = {
             cmocka_unit_test(test_initialize_finalize),
             cmocka_unit_test(test_add_remove),
+            cmocka_unit_test(test_unsupported_element_type_removes_signal),
+            cmocka_unit_test(test_hold_release_clears),
             cmocka_unit_test(test_one_signal),
             // test hold
             // test buffer wrap

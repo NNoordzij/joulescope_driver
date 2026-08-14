@@ -111,10 +111,14 @@ struct jsdrvp_msg_s * msg_queue_pop_immediate(struct msg_queue_s* queue) {
     struct jsdrv_list_s * item;
     struct jsdrvp_msg_s * msg = NULL;
     pthread_mutex_lock(&queue->mutex);
-    jsdrv_os_event_reset(queue->event);
     item = jsdrv_list_remove_head(&queue->items);
     if (item) {
         msg = JSDRV_CONTAINER_OF(item, struct jsdrvp_msg_s, item);
+        if (jsdrv_list_is_empty(&queue->items)) {
+            jsdrv_os_event_reset(queue->event);
+        }
+    } else {
+        jsdrv_os_event_reset(queue->event);
     }
     pthread_mutex_unlock(&queue->mutex);
     return msg;

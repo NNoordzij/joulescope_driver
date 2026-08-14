@@ -31,6 +31,10 @@
 JSDRV_CPP_GUARD_START
 
 #define JS110_SUPPRESS_SAMPLES_MAX 64U  // must be power of 2
+// limits sized so pre + window + post always fits the sample ring
+#define JS110_SUPPRESS_PRE_MAX 8U
+#define JS110_SUPPRESS_WINDOW_MAX 31U
+#define JS110_SUPPRESS_POST_MAX 8U
 #define JS110_I_RANGE_OFF 7U
 #define JS110_I_RANGE_MISSING 8U
 
@@ -80,7 +84,6 @@ struct js110_sp_s {
     const uint8_t (*_suppress_matrix)[9][9];
 
     int32_t _suppress_samples_remaining;  // the suppress counter, 0 = idle, 1 = take action, >1 = decrement
-    int32_t _suppress_samples_counter;
     uint8_t _suppress_mode;
 
     uint16_t sample_toggle_last;

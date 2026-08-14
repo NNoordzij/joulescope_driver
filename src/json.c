@@ -27,9 +27,14 @@ const char * ESCAPE = "\"\\/bfnrtu";
 #define ADVANCE(s__)    (s__)->offset++
 #define ROE(x)   do {int32_t rc__ = (x); if (rc__) {return rc__;}} while (0)
 
+// Bound recursion: JSON arrives from devices (untrusted input) and each
+// object/array nesting level consumes host stack.
+#define DEPTH_MAX (64)
+
 struct parse_s {
     const char * json;
     uint32_t offset;
+    uint32_t depth;
 
     jsdrv_json_fn cbk_fn;
     void * cbk_user_data;
@@ -128,6 +133,10 @@ static int32_t parse_object(struct parse_s * s) {
     if (NEXT(s) != '{') {
         return JSDRV_ERROR_SYNTAX_ERROR;
     }
+    if (++s->depth > DEPTH_MAX) {
+        JSDRV_LOGE("byte %u: nesting too deep", s->offset);
+        return JSDRV_ERROR_SYNTAX_ERROR;
+    }
     emit(s, &delim(JSDRV_JSON_OBJ_START));
     ADVANCE(s);
     skip_whitespace(s);
@@ -152,11 +161,16 @@ static int32_t parse_object(struct parse_s * s) {
     }
     emit(s, &delim(JSDRV_JSON_OBJ_END));
     ADVANCE(s);
+    --s->depth;
     return 0;
 }
 
 static int32_t parse_array(struct parse_s * s) {
     if (NEXT(s) != '[') {
+        return JSDRV_ERROR_SYNTAX_ERROR;
+    }
+    if (++s->depth > DEPTH_MAX) {
+        JSDRV_LOGE("byte %u: nesting too deep", s->offset);
         return JSDRV_ERROR_SYNTAX_ERROR;
     }
     emit(s, &delim(JSDRV_JSON_ARRAY_START));
@@ -177,6 +191,7 @@ static int32_t parse_array(struct parse_s * s) {
     }
     emit(s, &delim(JSDRV_JSON_ARRAY_END));
     ADVANCE(s);
+    --s->depth;
     return 0;
 }
 
@@ -185,7 +200,7 @@ static int32_t parse_literal(struct parse_s * s, const char * literal, struct js
     char ch;
     while (*literal) {
         ch = NEXT(s);
-        if (!ch) {
+        if (ch != *literal) {
             JSDRV_LOGE("byte %u: invalid value", offset);
             return JSDRV_ERROR_SYNTAX_ERROR;
         }
@@ -198,7 +213,8 @@ static int32_t parse_literal(struct parse_s * s, const char * literal, struct js
 
 static int32_t parse_number(struct parse_s * s) {
     bool is_neg = false;
-    int32_t whole = 0;
+    bool is_overflow = false;
+    int64_t whole = 0;
     uint32_t offset = s->offset;
     char ch = NEXT(s);
     if (ch == '-') {
@@ -215,7 +231,11 @@ static int32_t parse_number(struct parse_s * s) {
         while (1) {
             ch = NEXT(s);
             if ((ch >= '0') && (ch <= '9')) {
-                whole = whole * 10 + (ch - '0');
+                if (whole > ((INT64_MAX - (ch - '0')) / 10)) {
+                    is_overflow = true;
+                } else {
+                    whole = whole * 10 + (ch - '0');
+                }
             } else {
                 break;
             }
@@ -226,13 +246,21 @@ static int32_t parse_number(struct parse_s * s) {
         return JSDRV_ERROR_SYNTAX_ERROR;
     }
 
-    if (!is_in(NEXT(s), ".eE")) {  // i32
+    if (!is_in(NEXT(s), ".eE")) {  // integer
+        if (is_overflow) {
+            JSDRV_LOGE("byte %u: integer overflow", offset);
+            return JSDRV_ERROR_SYNTAX_ERROR;
+        }
         if (is_neg) {
             whole = -whole;
         }
-        emit(s, &jsdrv_union_i32(whole));
+        if ((whole >= INT32_MIN) && (whole <= INT32_MAX)) {
+            emit(s, &jsdrv_union_i32((int32_t) whole));
+        } else {
+            emit(s, &jsdrv_union_i64(whole));
+        }
     } else { // f64 support
-        double f64 = whole;
+        double f64 = (double) whole;
         if (NEXT(s) == '.') {
             ADVANCE(s);
             int32_t pow10 = 0;
@@ -270,20 +298,23 @@ static int32_t parse_number(struct parse_s * s) {
             }
 
             if (!((ch >= '0') && (ch <= '9'))) {
-                JSDRV_LOGE("f64 invalid exponent", offset);
+                JSDRV_LOGE("byte %u: f64 invalid exponent", offset);
                 return JSDRV_ERROR_SYNTAX_ERROR;
             }
 
             while (1) {
                 if ((ch >= '0') && (ch <= '9')) {
                     whole = whole * 10 + (ch - '0');
+                    if (whole > 100000) {
+                        whole = 100000;  // clamp; pow() saturates to inf/0
+                    }
                 } else {
                     break;
                 }
                 ADVANCE(s);
                 ch = NEXT(s);
             }
-            e = whole;
+            e = (double) whole;
 
             if (NEXT(s) == '.') {
                 ADVANCE(s);
@@ -338,6 +369,7 @@ int32_t jsdrv_json_parse(const char * json, jsdrv_json_fn cbk_fn, void * cbk_use
     struct parse_s s = {
             .json = json,
             .offset = 0,
+            .depth = 0,
             .cbk_fn = cbk_fn,
             .cbk_user_data = cbk_user_data,
     };

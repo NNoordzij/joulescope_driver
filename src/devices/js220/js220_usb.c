@@ -378,7 +378,7 @@ static struct jsdrvp_msg_s * ll_await(struct dev_s * d, msg_filter_fn filter_fn,
             .events = POLLIN,
             .revents = 0,
         };
-        poll(&fds, 1, 2);
+        poll(&fds, 1, (int) timeout_ms);
 #endif
         struct jsdrvp_msg_s * m = msg_queue_pop_immediate(d->ll.rsp_q);
         if (m) {
@@ -1020,6 +1020,11 @@ static int32_t on_sampling_frequency(struct dev_s * d,  const struct jsdrv_union
         JSDRV_LOGW("Could not process sampling frequency");
         return JSDRV_ERROR_PARAMETER_INVALID;
     }
+    if ((0 == v.value.u32) || (v.value.u32 > SAMPLING_FREQUENCY)
+            || (0 != (SAMPLING_FREQUENCY % v.value.u32))) {
+        JSDRV_LOGW("Invalid sampling frequency %lu", v.value.u32);
+        return JSDRV_ERROR_PARAMETER_INVALID;
+    }
 
     stream_suspend(d);
     d->fs = v.value.u32;
@@ -1082,13 +1087,24 @@ static int32_t on_sampling_frequency(struct dev_s * d,  const struct jsdrv_union
     }
     stream_resume(d);
 
+    if (d->fs != v.value.u32) {
+        // the requested rate was coerced (sinc1 signal_n 2/3 forced to 4);
+        // republish so clients see the actual rate, not the request
+        JSDRV_LOGW("h/fs %lu coerced to %lu", v.value.u32, d->fs);
+        send_to_frontend(d, "h/fs", &jsdrv_union_u32_r(d->fs));
+    }
+
     return 0;
 }
 
 static int32_t on_publish_rate(struct dev_s * d,  const struct jsdrv_union_s * value) {
     struct jsdrv_union_s v = *value;
     if (jsdrv_union_as_type(&v, JSDRV_UNION_U32)) {
-        JSDRV_LOGW("Could not process sampling frequency");
+        JSDRV_LOGW("Could not process publish rate");
+        return JSDRV_ERROR_PARAMETER_INVALID;
+    }
+    if (0 == v.value.u32) {  // divide-by-zero in element_count_max computation
+        JSDRV_LOGW("Invalid publish rate 0");
         return JSDRV_ERROR_PARAMETER_INVALID;
     }
     d->publish_rate = v.value.u32;
@@ -1100,6 +1116,16 @@ static int32_t on_filter(struct dev_s * d,  const struct jsdrv_union_s * value) 
     if (jsdrv_union_as_type(&v, JSDRV_UNION_U32)) {
         JSDRV_LOGW("Could not process signal downsampling filter setting");
         return JSDRV_ERROR_PARAMETER_INVALID;
+    }
+    if (v.value.u32 > DOWNSAMPLE_SINC1) {
+        JSDRV_LOGW("Invalid signal downsampling filter %lu", v.value.u32);
+        return JSDRV_ERROR_PARAMETER_INVALID;
+    }
+    if ((DOWNSAMPLE_SINC1 == v.value.u32) && !has_on_instrument_downsample(d)) {
+        // firmware/FPGA < 1.3.0 cannot decimate on-instrument; accepting
+        // sinc1 here would desynchronize host and instrument decimation
+        JSDRV_LOGW("sinc1 filter requires firmware and FPGA >= 1.3.0");
+        return JSDRV_ERROR_UNAVAILABLE;
     }
     d->signal_downsample_filter = v.value.u32;
     return on_sampling_frequency(d, &jsdrv_union_u32_r(d->fs));
@@ -1183,14 +1209,14 @@ static bool handle_cmd(struct dev_s * d, struct jsdrvp_msg_s * msg) {
             struct jsdrv_union_s value = msg->value;
             rc = jsdrv_union_as_type(&value, JSDRV_UNION_F64);
             if (!rc) {
-                d->i_scale = (float) msg->value.value.f64;
+                d->i_scale = (float) value.value.f64;
             }
             send_return_code_to_frontend(d, topic, rc);
         } else if (0 == strcmp("h/v_scale", topic)) {
             struct jsdrv_union_s value = msg->value;
             rc = jsdrv_union_as_type(&value, JSDRV_UNION_F64);
             if (!rc) {
-                d->v_scale = (float) msg->value.value.f64;
+                d->v_scale = (float) value.value.f64;
             }
             send_return_code_to_frontend(d, topic, rc);
         } else if (0 == strcmp("h/state", topic)) {
@@ -1523,13 +1549,15 @@ static void handle_stream_in_port0(struct dev_s * d, uint32_t * p_u32, uint16_t 
             if (has_on_instrument_downsample(d)) {
                 send_to_frontend(d, "h/filter$", &jsdrv_union_cjson_r(signal_downsample_filter));
             }
-            send_to_frontend(d, "h/i_scale", &jsdrv_union_cjson_r(i_scale_factor));
-            send_to_frontend(d, "h/v_scale", &jsdrv_union_cjson_r(v_scale_factor));
+            send_to_frontend(d, "h/i_scale$", &jsdrv_union_cjson_r(i_scale_factor));
+            send_to_frontend(d, "h/v_scale$", &jsdrv_union_cjson_r(v_scale_factor));
             send_to_frontend(d, "h/!reset$", &jsdrv_union_cjson_r(reset_meta));
             send_to_frontend(d, "c/fw/version", &jsdrv_union_u32_r(c->fw_version));
             send_to_frontend(d, "c/hw/version", &jsdrv_union_u32_r(c->hw_version));
             send_to_frontend(d, "s/fpga/version", &jsdrv_union_u32_r(c->fpga_version));
             send_to_frontend(d, "h/filter", &jsdrv_union_u32_r(0));
+            send_to_frontend(d, "h/i_scale", &jsdrv_union_f32_r(d->i_scale));
+            send_to_frontend(d, "h/v_scale", &jsdrv_union_f32_r(d->v_scale));
 
             if (d->ll_await_break_on == BREAK_CONNECT) {
                 d->ll_await_break_on = BREAK_NONE;
@@ -1835,6 +1863,15 @@ static bool handle_rsp(struct dev_s * d, struct jsdrvp_msg_s * msg) {
         return false;
     }
     if (0 == strcmp(JSDRV_USBBK_MSG_STREAM_IN_DATA, msg->topic)) {
+        if (JSDRV_UNION_BIN != msg->value.type) {
+            // Not a loaned stream buffer.  Returning it to the backend
+            // would be treated as a buffer loan, so free it (mirrors
+            // the mb_device handle_rsp guard).
+            JSDRV_LOGW("stream_in_data with non-bin type %d: drop",
+                       (int) msg->value.type);
+            jsdrvp_msg_free(d->context, msg);
+            return true;
+        }
         JSDRV_LOGD3("stream_in_data sz=%d", (int) msg->value.size);
         handle_stream_in(d, msg);
         msg_queue_push(d->ll.cmd_q, msg);  // return

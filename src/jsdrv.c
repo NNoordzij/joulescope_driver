@@ -464,6 +464,7 @@ void jsdrvp_device_subscribe(struct jsdrv_context_s * context, const char * dev_
     struct frontend_dev_s * dev = device_lookup(context, dev_topic);
     if (NULL == dev) {
         JSDRV_LOGE("jsdrvp_ul_device_subscribe but device not found: %s", dev_topic);
+        return;
     }
     JSDRV_LOGD1("jsdrvp_device_subscribe %s : %s", dev_topic, topic);
     struct jsdrvp_msg_s * m = jsdrvp_msg_alloc(context);
@@ -484,6 +485,7 @@ void jsdrvp_device_unsubscribe(struct jsdrv_context_s * context, const char * de
     struct frontend_dev_s * dev = device_lookup(context, dev_topic);
     if (NULL == dev) {
         JSDRV_LOGE("jsdrvp_ul_device_unsubscribe but device not found: %s", dev_topic);
+        return;
     }
     JSDRV_LOGD1("jsdrvp_device_unsubscribe %s : %s", dev_topic, topic);
     struct jsdrvp_msg_s * m = jsdrvp_msg_alloc(context);
@@ -543,10 +545,12 @@ static void device_add_msg(struct jsdrv_context_s * c, struct jsdrvp_msg_s * msg
         rv = dt->device_factory(&d->device, c, &msg->payload.device);
     }
     if (rv) {
+        // The device never appears in @/list; see doc/plans/design_review_2026-07.md
+        // for adding a frontend diagnostic topic.
         JSDRV_LOGE("device_add(%s) failed with %d", model, rv);
         jsdrvp_msg_free(c, msg);
+        jsdrv_list_remove(&d->item);
         jsdrv_free(d);
-        // todo indicate device failure?
         return;
     }
 
@@ -776,7 +780,6 @@ static JSDRV_THREAD_RETURN_TYPE frontend_thread(JSDRV_THREAD_ARG_TYPE lpParam) {
     BACKEND_INIT(c, jsdrv_unittest_backend_factory);
 #else
     BACKEND_INIT(c, jsdrv_usb_backend_factory);
-    // todo BACKEND_INIT(c, jsdrv_emulation_backend_factory);
 #endif
 
     while (!c->do_exit) {

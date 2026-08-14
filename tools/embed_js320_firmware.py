@@ -198,9 +198,9 @@ def main():
         index = fetch_index(args.index_url)
         try:
             entry = index[0]
-        except KeyError:
+        except (KeyError, IndexError):
             raise RuntimeError(
-                f'no js320.stable entry in {args.index_url}')
+                f'no firmware entry in {args.index_url}')
 
         data, image_url = fetch_image(args.index_url, entry)
         version = tuple(entry['version'])

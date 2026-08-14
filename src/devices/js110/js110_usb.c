@@ -44,6 +44,9 @@
 #define INTERVAL_MS                 (100U)
 #define SENSOR_COMMAND_TIMEOUT_MS   (3000U)
 #define FRAME_SIZE_BYTES            (512U)
+// Fill missing samples for skips up to this many frames (~32 ms at 2 MSPS);
+// larger skips indicate resync/restart and accept the discontinuity.
+#define PKT_INDEX_SKIP_FILL_MAX     (512U)
 #define ROE JSDRV_RETURN_ON_ERROR
 #define SAMPLING_FREQUENCY          (2000000U)
 #define STREAM_PAYLOAD_FULL         (JSDRV_STREAM_DATA_SIZE - JSDRV_STREAM_HEADER_SIZE - JS220_USB_FRAME_LENGTH)
@@ -387,7 +390,7 @@ static const struct param_s PARAMS[] = {
             "\"dtype\": \"u32\","
             "\"brief\": \"Number of 2 Msps samples per block.\","
             "\"default\": 1000000,"
-            "\"range\": [0, 2000000]"
+            "\"range\": [1, 2000000]"
         "}",
         on_stats_scnt,
     },
@@ -622,7 +625,7 @@ static void statistics_fwd(struct js110_dev_s * d, struct js110_host_status_s co
     dst->decimate_factor = 1;
     dst->block_sample_count = s->samples_this;
     dst->sample_freq = s->samples_per_second;
-    dst->rsv3_u32 = 0;
+    dst->decimate_factor32 = 1;
     dst->block_sample_id = s->samples_total;
     dst->accum_sample_id = 0;
 
@@ -970,26 +973,44 @@ static void on_voltage_lsb_source(struct js110_dev_s * d, const struct jsdrv_uni
 }
 
 static void on_i_range_mode(struct js110_dev_s * d, const struct jsdrv_union_s * value) {
+    if (value->value.u8 > JS110_SUPPRESS_MODE_NAN) {
+        JSDRV_LOGW("s/i/range/mode %d invalid, ignored", (int) value->value.u8);
+        return;
+    }
     d->sample_processor._suppress_mode = value->value.u8;
 }
 
 static void on_i_range_pre(struct js110_dev_s * d, const struct jsdrv_union_s * value) {
     JSDRV_LOGI("on_i_range_pre %d", (int) value->value.u8);
+    if (value->value.u8 > JS110_SUPPRESS_PRE_MAX) {
+        JSDRV_LOGW("s/i/range/pre %d invalid, ignored", (int) value->value.u8);
+        return;
+    }
     d->sample_processor._suppress_samples_pre = value->value.u8;
 }
 
 static void on_i_range_win(struct js110_dev_s * d, const struct jsdrv_union_s * value) {
     JSDRV_LOGI("on_i_range_win %d", (int) value->value.u8);
-    js110_sp_suppress_win(&d->sample_processor, value->value.u8);
+    if (js110_sp_suppress_win(&d->sample_processor, value->value.u8)) {
+        JSDRV_LOGW("s/i/range/win %d invalid, ignored", (int) value->value.u8);
+    }
 }
 
 static void on_i_range_win_sz(struct js110_dev_s * d, const struct jsdrv_union_s * value) {
     JSDRV_LOGI("on_i_range_win_sz %d", (int) value->value.u8);
+    if (value->value.u8 > JS110_SUPPRESS_WINDOW_MAX) {
+        JSDRV_LOGW("s/i/range/win_sz %d invalid, ignored", (int) value->value.u8);
+        return;
+    }
     d->sample_processor._suppress_samples_window = value->value.u8;
 }
 
 static void on_i_range_post(struct js110_dev_s * d, const struct jsdrv_union_s * value) {
     JSDRV_LOGI("on_i_range_post %d", (int) value->value.u8);
+    if (value->value.u8 > JS110_SUPPRESS_POST_MAX) {
+        JSDRV_LOGW("s/i/range/post %d invalid, ignored", (int) value->value.u8);
+        return;
+    }
     d->sample_processor._suppress_samples_post = value->value.u8;
 }
 
@@ -1084,6 +1105,10 @@ static void on_gpi_1_ctrl(struct js110_dev_s * d, const struct jsdrv_union_s * v
 static void on_stats_scnt(struct js110_dev_s * d, const struct jsdrv_union_s * value) {
     struct jsdrv_union_s v = *value;
     jsdrv_union_as_type(&v, JSDRV_UNION_U32);
+    if (0 == v.value.u32) {  // would silently stop statistics forever
+        JSDRV_LOGW("s/stats/scnt 0 invalid, ignored");
+        return;
+    }
     js110_stats_sample_count_set(&d->stats, v.value.u32);
 }
 
@@ -1459,14 +1484,19 @@ static void handle_stream_in_frame(struct js110_dev_s * d, uint32_t * p_u32) {
         return;
     }
     if ((d->packet_index & 0xffff) != pkt_index) {
-        JSDRV_LOGW("pkt_index skip: expected %d, received %d", d->packet_index, pkt_index);
-        //while ((d->packet_index & 0xffff) != pkt_index) {
-        //    for (uint32_t i = 2; i < (FRAME_SIZE_BYTES / 4); ++i) {
-        //        handle_sample(d, 0xffffffffLU, voltage_range);
-        //    }
-        //    d->packet_index = (d->packet_index + 1) & 0xffff;
-        //}
-        // todo handle skips better.
+        uint32_t skip = (uint32_t) ((pkt_index - d->packet_index) & 0xffff);
+        JSDRV_LOGW("pkt_index skip: expected %d, received %d (%lu frames)",
+                   (int) (d->packet_index & 0xffff), (int) pkt_index, skip);
+        if (skip <= PKT_INDEX_SKIP_FILL_MAX) {
+            // insert missing samples so sample_id, the time map, and
+            // statistics block boundaries stay aligned to wall clock
+            for (uint32_t k = 0; k < skip; ++k) {
+                for (uint32_t i = 2; i < (FRAME_SIZE_BYTES / 4); ++i) {
+                    handle_sample(d, 0xffffffffLU, voltage_range);
+                }
+            }
+        }
+        // larger skips (resync, reorder, or restart) accept the discontinuity
         d->packet_index = pkt_index;
     }
     jsdrv_tmf_add(d->time_map_filter, d->sample_id, jsdrv_time_utc());
@@ -1500,6 +1530,15 @@ static bool handle_rsp(struct js110_dev_s * d, struct jsdrvp_msg_s * msg) {
         return false;
     }
     if (0 == strcmp(JSDRV_USBBK_MSG_STREAM_IN_DATA, msg->topic)) {
+        if (JSDRV_UNION_BIN != msg->value.type) {
+            // Not a loaned stream buffer.  Returning it to the backend
+            // would be treated as a buffer loan, so free it (mirrors
+            // the mb_device handle_rsp guard).
+            JSDRV_LOGW("stream_in_data with non-bin type %d: drop",
+                       (int) msg->value.type);
+            jsdrvp_msg_free(d->context, msg);
+            return true;
+        }
         handle_stream_in(d, msg);
         msg_queue_push(d->ll.cmd_q, msg);  // return
         return true;

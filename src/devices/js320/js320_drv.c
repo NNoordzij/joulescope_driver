@@ -26,6 +26,7 @@
 #include "jsdrv_prv/devices/js320/js320_fwup.h"
 #include "jsdrv_prv/devices/js320/js320_jtag.h"
 #include "jsdrv_prv/devices/js320/js320_stats.h"
+#include "jsdrv_prv/downsample_sinc.h"
 #include "jsdrv_prv/log.h"
 #include "jsdrv_prv/devices/mb_device/mb_drv.h"
 #include "jsdrv_prv/platform.h"
@@ -48,13 +49,19 @@
 // js320/gateware/source/regfile.v so that the host's runtime decimation
 // estimate matches the actual device output rate immediately after
 // open, before any user reconfiguration arrives.
-#define JS320_DEFAULT_SIGNAL_DWN_N (0U)      // 0 = passthrough (no extra i/v/p decimation)
+#define JS320_DEFAULT_SIGNAL_DWN_N    (0U)   // 0 = passthrough (no extra i/v/p decimation)
+#define JS320_DEFAULT_SIGNAL_DWN_MODE (1U)   // s/dwnN/mode: 0=bypass, 1=sinc1, 2=sinc2, 3=sinc3
 #define JS320_DEFAULT_GPI_DWN_MODE (2U)      // 0=off, 1=toggle, 2=first, 3=majority
 #define JS320_DEFAULT_GPI_DWN_N    (16U)     // gateware default factor
 
 // Post-JS320_DECIMATE signal rate (16 MHz / 16 = 1 MHz).  The s/dwnN/N
 // register divides this further; h/fs unification computes N = this / fs.
 #define JS320_SIGNAL_RATE_AFTER_DECIMATE (1000000U)
+
+// Lowest rate the instrument can produce directly (s/dwnN/N max 1000).
+// h/fs below this sets the instrument to this rate and finishes with
+// host-side sincN decimation matching s/dwnN/mode.
+#define JS320_MIN_ON_INSTRUMENT_FS (JS320_SIGNAL_RATE_AFTER_DECIMATE / 1000U)
 
 // Drop-until-ack timeout.  Host drops sample frames after a s/dwnN/N
 // change until the firmware's s/dwnN/!ack arrives.  If the ack never
@@ -91,6 +98,9 @@ struct js320_port_s {
     uint64_t sample_id_next;          // next expected sample_id
     uint8_t  current_index;           // index assigned to msg_in (ADC/range may vary)
     bool     enabled;                 // last-seen s/X/ctrl from frontend (used in step 4)
+    // Host-side sincN decimation for h/fs < 1 kHz (ch 5-7 only).
+    struct jsdrv_downsample_sinc_s * host_filter;  // NULL when inactive
+    uint64_t filter_in_next;          // next expected input sample_id (0 = none yet)
 };
 
 static const struct js320_port_def_s PORT_DEFS[JS320_CH_COUNT] = {
@@ -115,6 +125,32 @@ static const struct js320_port_def_s PORT_DEFS[JS320_CH_COUNT] = {
     // ch 3, 4, 14, 15 unused (data_topic NULL); 14 (statistics) is dispatched separately.
 };
 
+static const char * js320_sampling_frequency_meta = "{"
+    "\"dtype\": \"u32\","
+    "\"brief\": \"The sampling frequency.\","
+    "\"default\": 1000000,"
+    "\"options\": ["
+        "[1000000, \"1 MHz\"],"
+        "[200000, \"200 kHz\"],"
+        "[100000, \"100 kHz\"],"
+        "[50000, \"50 kHz\"],"
+        "[20000, \"20 kHz\"],"
+        "[10000, \"10 kHz\"],"
+        "[5000, \"5 kHz\"],"
+        "[2000, \"2 kHz\"],"
+        "[1000, \"1 kHz\"],"  // lowest on-instrument output rate
+        "[500, \"500 Hz\"],"
+        "[200, \"200 Hz\"],"
+        "[100, \"100 Hz\"],"
+        "[50, \"50 Hz\"],"
+        "[20, \"20 Hz\"],"
+        "[10, \"10 Hz\"],"
+        "[5, \"5 Hz\"],"
+        "[2, \"2 Hz\"],"
+        "[1, \"1 Hz\"]"
+    "]"
+"}";
+
 static const char * js320_publish_rate_meta = "{"
     "\"dtype\": \"u32\","
     "\"brief\": \"The approximate sample publish frequency.\","
@@ -137,6 +173,18 @@ static const char * js320_publish_rate_meta = "{"
         "[2, \"2 Hz\"],"
         "[1, \"1 Hz\"]"
     "]"
+"}";
+
+static const char * js320_i_scale_meta = "{"
+    "\"dtype\": \"f32\","
+    "\"brief\": \"The current signal scale factor.\","
+    "\"default\": 1.0"
+"}";
+
+static const char * js320_v_scale_meta = "{"
+    "\"dtype\": \"f32\","
+    "\"brief\": \"The voltage signal scale factor.\","
+    "\"default\": 1.0"
 "}";
 
 // Sentinel for last_sent_ctrl entries that have never been forwarded.
@@ -179,7 +227,9 @@ struct js320_drv_s {
     // (mb_device.c default forwarding) so the gateware sees the new
     // values.  The host uses them to compute the runtime effective
     // decimation factor for each port.
-    uint32_t signal_dwn_n;  // s/dwnN/N: extra i/v/p decimation atop the static 1 MHz output (0 or 1 = passthrough)
+    uint32_t signal_dwn_n;    // s/dwnN/N: extra i/v/p decimation atop the static 1 MHz output (0 or 1 = passthrough)
+    uint32_t signal_dwn_mode; // s/dwnN/mode: 0=bypass (1 Msps regardless of N), 1..3=sincN filter order
+    uint32_t signal_host_factor; // residual host decimation for h/fs < 1 kHz (1 = none); only h/fs sets it
     uint32_t gpi_dwn_mode;  // s/gpi/+/dwnN/mode: 0=off, 1=toggle, 2=first, 3=majority
     uint32_t gpi_dwn_n;     // s/gpi/+/dwnN/N: GPI decimation factor (mode!=0)
 
@@ -199,37 +249,62 @@ struct js320_drv_s {
     struct js320_ack_state_s signal_ack;
     struct js320_ack_state_s gpi_ack;
 
-    // Deferred-state-fetch interlock.  After ST_OPEN is entered, the
-    // JS320 ctrl firmware has only just told its sensor task to boot
-    // (the sensor side powers up in response to the USBD link-connect
-    // event).  state_fetch would hit BUSY until the sensor pubsub task
-    // is alive, so open_ready returns false and we call
-    // jsdrvp_mb_dev_state_fetch_start() from handle_publish when the
-    // first `s/...` publish proves the sensor task is running, or from
-    // on_timeout as a 2 s fallback.
+    // Sensor-ready interlock.  open_children defers OPEN# and arms this;
+    // when c/comm/sensor/state reports the sensor link up (== 1), the
+    // sensor `s` instance is synced (completing the open).  on_timeout
+    // completes the open without the sensor if it never comes up.
     bool     waiting_for_sensor;
+    // Latest c/comm/sensor/state, cached on every pub (even when not
+    // waiting).  Lets open_children detect a sensor that came up BEFORE
+    // the watch was armed -- the one-shot 0->1 pub already passed, so a
+    // transition-only check would miss it and fall through to the backstop.
+    bool     sensor_link_up;
 };
 
-// How long to wait for the sensor task to come up before falling back
-// to state_fetch anyway.  The JS320 ctrl firmware powers the sensor on
-// USBD connect; typical boot time is < 1 s.
-#define JS320_SENSOR_READY_TIMEOUT_NS (2 * JSDRV_TIME_SECOND)
+// How long to wait for the sensor link (c/comm/sensor/state == 1) before
+// completing open without it.  With the level-triggered open_children
+// check (see js320_open_children), a present sensor is always synced --
+// either it is already up when the watch is armed, or its 0->1 pub is
+// caught live.  This backstop therefore only fires when the sensor is
+// genuinely absent (e.g. it needs a firmware update): it guarantees OPEN#
+// still fires so the UI can recover.  Measured cold link-up is ~90 ms, so
+// 0.5 s is >5x margin for a present-but-slow sensor while keeping even the
+// absent-sensor path well within the 1.0 s default jsdrv_open timeout.
+#define JS320_SENSOR_READY_TIMEOUT_NS (JSDRV_TIME_SECOND / 2)
 
 // --- Streaming signal helpers ---
 
 // Map the s/dwnN/N register value to the actual extra decimation factor
 // applied by gateware/source/decimate.v on top of the 1 MHz signal rate.
 //   N=0 or 1: passthrough (factor 1)
-//   N=2 or 3: factor 2 (gateware clamps 3 to 2)
+//   N=2 or 3: factor 4 (gateware promotes 2 and 3 to 4)
 //   N=4..1000: factor N
 static inline uint32_t js320_signal_extra_factor(uint32_t n) {
     if (n <= 1U) {
         return 1U;
     }
-    if (n == 3U) {
-        return 2U;
+    if (n <= 3U) {
+        return 4U;
     }
     return n;
+}
+
+// The effective device-side extra decimation factor, accounting for
+// s/dwnN/mode: mode=0 (bypass) streams 1 Msps regardless of N.
+static uint32_t js320_signal_device_factor(struct js320_drv_s * self) {
+    if (0U == self->signal_dwn_mode) {
+        return 1U;
+    }
+    return js320_signal_extra_factor(self->signal_dwn_n);
+}
+
+// The effective host-side residual decimation factor.  Bypass disables
+// host decimation just as it disables the on-instrument decimation.
+static uint32_t js320_signal_host_factor_active(struct js320_drv_s * self) {
+    if (0U == self->signal_dwn_mode) {
+        return 1U;
+    }
+    return self->signal_host_factor ? self->signal_host_factor : 1U;
 }
 
 // Map (mode, N) for the gateware/source/decimateN_digital.v gpi_decimate
@@ -244,22 +319,37 @@ static inline uint32_t js320_gpi_factor(uint32_t mode, uint32_t n) {
     return n;
 }
 
-// Compute the runtime decimation factor for a given channel: the number
-// of native 16 MHz sample_id ticks per output sample, accounting for any
-// dynamic dwnN/N or gpi/+/dwnN/{mode,N} the user has set.
-static uint32_t js320_runtime_decimate(struct js320_drv_s * self, uint8_t ch) {
-    const struct js320_port_def_s * def = &PORT_DEFS[ch];
-    if ((def->field_id == JSDRV_FIELD_CURRENT)
+static inline bool js320_is_ivp_field(const struct js320_port_def_s * def) {
+    return (def->field_id == JSDRV_FIELD_CURRENT)
             || (def->field_id == JSDRV_FIELD_VOLTAGE)
-            || (def->field_id == JSDRV_FIELD_POWER)) {
+            || (def->field_id == JSDRV_FIELD_POWER);
+}
+
+// Native 16 MHz sample_id ticks per DEVICE-STREAMED sample for a
+// channel: the decimation performed on-instrument, excluding any host
+// decimation.  This is the input tick step for the host sincN filters.
+static uint32_t js320_device_decimate(struct js320_drv_s * self, uint8_t ch) {
+    const struct js320_port_def_s * def = &PORT_DEFS[ch];
+    if (js320_is_ivp_field(def)) {
         // i/v/p: 16 (static, 16 MHz -> 1 MHz) * extra dwnN factor
-        return JS320_DECIMATE * js320_signal_extra_factor(self->signal_dwn_n);
+        return JS320_DECIMATE * js320_signal_device_factor(self);
     }
     if (def->field_id == JSDRV_FIELD_GPI) {
         // GPI: gpi_decimate runs at 16 MHz native; effective factor = N (or 1 if mode=0)
         return js320_gpi_factor(self->gpi_dwn_mode, self->gpi_dwn_n);
     }
     return def->decimate_factor ? def->decimate_factor : 1U;
+}
+
+// Combined runtime decimation factor for a given channel: the number of
+// native 16 MHz sample_id ticks per OUTPUT sample, including the host
+// residual decimation for i/v/p when h/fs < 1 kHz.
+static uint32_t js320_runtime_decimate(struct js320_drv_s * self, uint8_t ch) {
+    uint32_t d = js320_device_decimate(self, ch);
+    if (js320_is_ivp_field(&PORT_DEFS[ch])) {
+        d *= js320_signal_host_factor_active(self);
+    }
+    return d;
 }
 
 // Initialize the in-memory header of a fresh stream signal message.
@@ -478,6 +568,58 @@ static void js320_port_evaluate_flush(struct js320_drv_s * self,
     }
 }
 
+// Append i/v/p samples (ch 5-7), applying the host sincN decimation
+// filter when active (h/fs < 1 kHz).  Without a filter this is a plain
+// js320_port_append.  With a filter, each device sample feeds the
+// filter at its input-rate tick (native sample_id / device step) and
+// the (much rarer) outputs are batch-appended.  Each output sample_id
+// is stamped at the start of its filter window, so consecutive outputs
+// step by the combined decimate factor (device step * host factor).
+static void js320_signal_append_filtered(struct js320_drv_s * self,
+                                         struct jsdrvp_mb_dev_s * dev,
+                                         uint8_t ch,
+                                         uint64_t sample_id,
+                                         const float * data,
+                                         uint32_t sample_count) {
+    struct js320_port_s * port = &self->ports[ch];
+    struct jsdrv_downsample_sinc_s * filter = port->host_filter;
+    if (NULL == filter) {
+        js320_port_append(self, dev, ch, /*index=*/0U, /*topic_override=*/NULL,
+                          sample_id, data, sample_count);
+        return;
+    }
+    uint32_t in_step = js320_device_decimate(self, ch);
+    if (0U == in_step) {
+        in_step = 1U;
+    }
+    uint32_t r = jsdrv_downsample_sinc_decimate_factor(filter);
+    if ((0U != port->filter_in_next) && (sample_id != port->filter_in_next)) {
+        // Input discontinuity: emit what we have and restart the filter
+        // (it realigns and reseeds on the next sample).
+        js320_port_flush(self, dev, ch);
+        jsdrv_downsample_sinc_clear(filter);
+    }
+    port->filter_in_next = sample_id + (uint64_t) sample_count * in_step;
+
+    float out[256];  // device frames carry <= 253 samples, 1 output max per input
+    uint32_t out_count = 0;
+    uint64_t out_id = 0;
+    for (uint32_t i = 0; i < sample_count; ++i) {
+        uint64_t in_id = sample_id + (uint64_t) i * in_step;
+        float y;
+        if (jsdrv_downsample_sinc_add_f32(filter, in_id / in_step, data[i], &y)) {
+            if (0U == out_count) {
+                out_id = in_id - (uint64_t) (r - 1U) * in_step;  // window start
+            }
+            out[out_count++] = y;
+        }
+    }
+    if (out_count) {
+        js320_port_append(self, dev, ch, /*index=*/0U, /*topic_override=*/NULL,
+                          out_id, out, out_count);
+    }
+}
+
 // --- Smart power computation ---
 
 // Reset a single port's accumulator state.  Used when a stream ctrl
@@ -493,6 +635,35 @@ static void js320_port_reset(struct js320_drv_s * self,
     }
     port->sample_id_next = 0;
     port->current_index = 0;
+    jsdrv_downsample_sinc_clear(port->host_filter);
+    port->filter_in_next = 0;
+}
+
+// Ensure the ch 5-7 host filters match the active residual factor and
+// sincN order.  Reallocates only when the configuration changed; always
+// resets the filter state so the next stream restarts cleanly.  With no
+// residual factor (h/fs >= 1 kHz, or bypass), the filters are freed and
+// the data path reverts to plain appends.
+static void js320_signal_filters_update(struct js320_drv_s * self) {
+    uint32_t r = js320_signal_host_factor_active(self);
+    uint32_t order = self->signal_dwn_mode;
+    for (uint8_t ch = 5U; ch <= 7U; ++ch) {
+        struct js320_port_s * port = &self->ports[ch];
+        if (r <= 1U) {
+            jsdrv_downsample_sinc_free(port->host_filter);
+            port->host_filter = NULL;
+        } else if ((NULL == port->host_filter)
+                || (jsdrv_downsample_sinc_decimate_factor(port->host_filter) != r)
+                || (jsdrv_downsample_sinc_order(port->host_filter) != order)) {
+            jsdrv_downsample_sinc_free(port->host_filter);
+            // On (out-of-memory) alloc failure, NULL passes the 1 kHz
+            // stream through unfiltered; the error is already logged.
+            port->host_filter = jsdrv_downsample_sinc_alloc(r, order);
+        } else {
+            jsdrv_downsample_sinc_clear(port->host_filter);
+        }
+        port->filter_in_next = 0;
+    }
 }
 
 // Initialize the host-side i/v/p compute buffers.  sbuf_f32_clear sets
@@ -635,32 +806,69 @@ static void js320_on_open(struct jsdrvp_mb_drv_s * drv, struct jsdrvp_mb_dev_s *
     // RAW mode is link-only (recovery fwup); skip frontend-facing metadata
     // publishes that assume the device-side pubsub / streaming will come up.
     if (0xFF != jsdrvp_mb_dev_open_mode(dev)) {
-        jsdrvp_mb_dev_send_to_frontend(dev, "h/fp$",
-            &jsdrv_union_cjson_r(js320_publish_rate_meta));
+        jsdrvp_mb_dev_send_to_frontend(dev, "h/fs$", &jsdrv_union_cjson_r(js320_sampling_frequency_meta));
+        jsdrvp_mb_dev_send_to_frontend(dev, "h/fp$", &jsdrv_union_cjson_r(js320_publish_rate_meta));
+        jsdrvp_mb_dev_send_to_frontend(dev, "h/i_scale$", &jsdrv_union_cjson_r(js320_i_scale_meta));
+        jsdrvp_mb_dev_send_to_frontend(dev, "h/v_scale$", &jsdrv_union_cjson_r(js320_v_scale_meta));
     }
     JSDRV_LOGI("JS320 driver opened: vendor=0x%04x product=0x%04x",
                identity->vendor_id, identity->product_id);
 }
 
-// The JS320 exposes two top-level pubsub tasks: `c` (ctrl-side) and
-// `s` (sensor-side).  state_fetch must enumerate both.
-static const char * js320_state_fetch_prefixes(struct jsdrvp_mb_drv_s * drv) {
-    (void) drv;
-    return "cs";
+// Start the deferred sensor `s` sync once the sensor link is up.  Shared
+// by the live-transition path (handle_publish) and the already-up path
+// (open_children).  On success, clears the sensor-ready interlock and its
+// backstop timeout and kicks a sensor timesync resync.  Returns false if
+// a sequence is still running (the caller then relies on on_timeout).
+static bool js320_sensor_sync_start(struct js320_drv_s * self,
+                                    struct jsdrvp_mb_dev_s * dev) {
+    // emit_open=false: on_instance_synced restores the host-side 'h'
+    // instance and completes the open, giving the order c -> s -> h -> OPEN#.
+    if (!jsdrvp_mb_dev_instance_state_sync(dev, 's', false)) {
+        return false;
+    }
+    self->waiting_for_sensor = false;
+    jsdrvp_mb_dev_set_timeout(dev, 0);
+    // Force a sensor timesync resync so s/ts/!map arrives promptly (the
+    // sensor comm ./comm/./!add only fires once).
+    jsdrvp_mb_dev_publish_to_device(dev, "s/ts/!resync", &jsdrv_union_u8_r(1));
+    return true;
 }
 
-// Defer state_fetch until the sensor task publishes — see
-// waiting_for_sensor doc on struct js320_drv_s.  The JS320 ctrl
-// firmware powers the sensor only after USBD reports connected, so
-// the sensor-side pubsub can take up to ~1 s to come up after the
-// host has already reached ST_OPEN.  Arming a 2 s driver timeout here
-// lets on_timeout fall back to state_fetch_start if the sensor-ready
-// signal never arrives.
-static bool js320_open_ready(struct jsdrvp_mb_drv_s * drv, struct jsdrvp_mb_dev_s * dev) {
+// The JS320 exposes two top-level pubsub tasks: `c` (ctrl-side, the USB
+// instance named in the link identity) and `s` (sensor-side, a child
+// instance).  mb_device syncs `c` as the core open; this hook then
+// DEFERS OPEN# until the sensor `s` instance is synced or times out, so
+// the device is not declared open with `s` topics missing.  Open still
+// never fails on the sensor: on a sensor-ready timeout we complete the
+// open anyway (so the UI can perform a firmware update if `s` is down).
+//
+// The sensor link comes up quickly (~90 ms after open) and is signalled
+// by c/comm/sensor/state -> 1.  Two cases, both handled:
+//   1. The link is still down when we arm here: handle_publish catches
+//      the live 0->1 pub and syncs `s`.
+//   2. The link already came up before the core `c` sync finished (e.g.
+//      under host-side open latency such as --tcp-server): the one-shot
+//      0->1 pub already passed, so we detect the cached state here and
+//      sync `s` immediately.  Missing this case is what previously left
+//      waiting_for_sensor set until the backstop, delaying OPEN# and
+//      (with a short caller timeout) spuriously failing the open.
+// on_timeout backstops only a genuinely-absent sensor.
+static bool js320_open_children(struct jsdrvp_mb_drv_s * drv,
+                                struct jsdrvp_mb_dev_s * dev) {
     struct js320_drv_s * self = (struct js320_drv_s *) drv;
     self->waiting_for_sensor = true;
     jsdrvp_mb_dev_set_timeout(dev, jsdrv_time_utc() + JS320_SENSOR_READY_TIMEOUT_NS);
-    return false;  // defer
+    if (self->sensor_link_up) {
+        // Case 2: sensor beat the ctrl open; sync now rather than waiting
+        // for a 0->1 transition that already fired and will not repeat.
+        JSDRV_LOGI("sensor already up at open_children; syncing 's' now");
+        if (!js320_sensor_sync_start(self, dev)) {
+            JSDRV_LOGW("sensor already up but 's' sync busy; "
+                       "on_timeout will complete open without sensor sync");
+        }
+    }
+    return true;  // defer OPEN# until the sensor sync completes or times out
 }
 
 static void js320_on_close(struct jsdrvp_mb_drv_s * drv, struct jsdrvp_mb_dev_s * dev) {
@@ -670,9 +878,15 @@ static void js320_on_close(struct jsdrvp_mb_drv_s * drv, struct jsdrvp_mb_dev_s 
     for (uint8_t ch = 0U; ch < JS320_CH_COUNT; ++ch) {
         js320_port_reset(self, dev, ch);
     }
+    for (uint8_t ch = 5U; ch <= 7U; ++ch) {
+        jsdrv_downsample_sinc_free(self->ports[ch].host_filter);
+        self->ports[ch].host_filter = NULL;
+    }
     js320_sbufs_clear(self);
     self->power_compute_on_host = false;
     self->signal_dwn_n = JS320_DEFAULT_SIGNAL_DWN_N;
+    self->signal_dwn_mode = JS320_DEFAULT_SIGNAL_DWN_MODE;
+    self->signal_host_factor = 1U;
     self->gpi_dwn_mode = JS320_DEFAULT_GPI_DWN_MODE;
     self->gpi_dwn_n = JS320_DEFAULT_GPI_DWN_N;
     memset(&self->signal_ack, 0, sizeof(self->signal_ack));
@@ -681,6 +895,7 @@ static void js320_on_close(struct jsdrvp_mb_drv_s * drv, struct jsdrvp_mb_dev_s 
         self->last_sent_ctrl[k] = JS320_CTRL_UNKNOWN;
     }
     self->waiting_for_sensor = false;
+    self->sensor_link_up = false;
     js320_fwup_on_close(self->fwup);
     js320_jtag_on_close(self->jtag);
     js320_cal_on_close(self->cal);
@@ -803,6 +1018,18 @@ static void js320_handle_app(struct jsdrvp_mb_drv_s * drv, struct jsdrvp_mb_dev_
         if (js320_ack_should_drop(&self->signal_ack, sample_id)) {
             return;
         }
+        float scale = 1.0;
+        switch (channel) {
+            case 5: scale = self->i_scale; break;
+            case 6: scale = self->v_scale; break;
+            case 7: scale = self->i_scale * self->v_scale; break;
+            default: break;
+        }
+
+        float * samples_f32 = (float *) payload_u32;
+        for (size_t i = 0; i < sample_count; ++i) {
+            *samples_f32++ *= scale;
+        }
     } else if ((channel >= 8U) && (channel <= 12U)) {
         if (js320_ack_should_drop(&self->gpi_ack, sample_id)) {
             return;
@@ -835,8 +1062,16 @@ static void js320_handle_app(struct jsdrvp_mb_drv_s * drv, struct jsdrvp_mb_dev_
         sbuf_f32_add(sbuf, sample_id, (float *) payload_u32, sample_count);
     }
 
-    js320_port_append(self, dev, channel, index, topic_override,
-                      sample_id, payload_u32, sample_count);
+    if ((channel >= 5U) && (channel <= 7U)) {
+        // i/v/p route through the host sincN decimation filter when
+        // h/fs < 1 kHz (plain append otherwise).  index is always 0 and
+        // there is no topic override for these channels.
+        js320_signal_append_filtered(self, dev, channel, sample_id,
+                                     (const float *) payload_u32, sample_count);
+    } else {
+        js320_port_append(self, dev, channel, index, topic_override,
+                          sample_id, payload_u32, sample_count);
+    }
     js320_port_evaluate_flush(self, dev, channel);
 
     if (self->power_compute_on_host && ((channel == 5U) || (channel == 6U))) {
@@ -927,29 +1162,26 @@ static inline bool js320_gpi_family_streaming(const struct js320_drv_s * self) {
 }
 
 // Apply a new s/dwnN/N value.  This is the single code path both the
-// `s/dwnN/N` and `h/fs` handlers funnel into: on JS320 decimation is
-// always on-instrument, so `h/fs` is just a rate-to-register translator
-// that ultimately produces the same side effects.  Responsibilities:
-//   - record the new register value in self->signal_dwn_n
-//   - derive the resulting host-visible fs (1 MHz / extra_factor) so
+// Shared side effects for any s/dwnN/{N,mode} change, which the `h/fs`,
+// `s/dwnN/N`, and `s/dwnN/mode` handlers all funnel into.
+// Responsibilities:
+//   - derive the resulting host-visible fs (1 MHz / device_factor) so
 //     smart-power and any other fs-dependent logic stays coherent
-//     whether the caller used h/fs or s/dwnN/N
+//     regardless of which topic the caller used
 //   - flush the i/v/p accumulators + sbufs
 //   - start the drop-until-ack window
-//   - forward to the device as `s/dwnN/N`
-//   - reconcile smart-power with the (possibly) new fs
 // The device handler brackets the decimate register update with a
-// streaming disable/enable and publishes s/dwnN/!ack carrying the
-// sample_id of the first new-rate sample; that ack releases the drop
-// window (handled in js320_handle_publish).
-static void js320_apply_signal_dwn_n(struct js320_drv_s * self,
-                                     struct jsdrvp_mb_dev_s * dev,
-                                     uint32_t n) {
-    self->signal_dwn_n = n;
-    self->fs = JS320_SIGNAL_RATE_AFTER_DECIMATE / js320_signal_extra_factor(n);
+// streaming disable/enable and publishes s/dwnN/!ack (for both N and
+// mode changes) carrying the sample_id of the first new-rate sample;
+// that ack releases the drop window (handled in js320_handle_publish).
+static void js320_signal_dwn_changed(struct js320_drv_s * self,
+                                     struct jsdrvp_mb_dev_s * dev) {
+    self->fs = JS320_SIGNAL_RATE_AFTER_DECIMATE / js320_signal_device_factor(self)
+            / js320_signal_host_factor_active(self);
     for (uint8_t ch = 5U; ch <= 7U; ++ch) {
         js320_port_reset(self, dev, ch);
     }
+    js320_signal_filters_update(self);
     js320_sbufs_clear(self);
     // Skip the drop-until-ack window when no channel in the signal family is
     // streaming: there are no in-flight old-rate samples to hide, and the
@@ -957,7 +1189,28 @@ static void js320_apply_signal_dwn_n(struct js320_drv_s * self,
     if (js320_signal_family_streaming(self)) {
         js320_ack_begin(&self->signal_ack, dev);
     }
+}
+
+// Apply a new s/dwnN/N value: record it, run the shared dwn side
+// effects, forward to the device, and reconcile smart-power.
+static void js320_apply_signal_dwn_n(struct js320_drv_s * self,
+                                     struct jsdrvp_mb_dev_s * dev,
+                                     uint32_t n) {
+    self->signal_dwn_n = n;
+    js320_signal_dwn_changed(self, dev);
     jsdrvp_mb_dev_publish_to_device(dev, "s/dwnN/N", &jsdrv_union_u32_r(n));
+    js320_reconcile_power(self, dev);
+}
+
+// Apply a new s/dwnN/mode value (0=bypass, 1..3=sincN).  Bypass streams
+// 1 Msps regardless of N, so a mode change can change the effective
+// rate just like an N change; run the same shared side effects.
+static void js320_apply_signal_dwn_mode(struct js320_drv_s * self,
+                                        struct jsdrvp_mb_dev_s * dev,
+                                        uint32_t mode) {
+    self->signal_dwn_mode = mode;
+    js320_signal_dwn_changed(self, dev);
+    jsdrvp_mb_dev_publish_to_device(dev, "s/dwnN/mode", &jsdrv_union_u32_r(mode));
     js320_reconcile_power(self, dev);
 }
 
@@ -995,14 +1248,26 @@ static void js320_apply_gpi_dwn_n(struct js320_drv_s * self,
         &jsdrv_union_u32_r(n));
 }
 
-// Map a requested host sample rate `fs` to the s/dwnN/N register value.
-// The JS320 always runs decimation on-instrument: native 16 MHz is first
-// divided by JS320_DECIMATE (16) to 1 MHz, then divided further by
-// js320_signal_extra_factor(n).  Returns 0 on success (*n_out written)
-// or a jsdrv error code if `fs` does not correspond to a supported value.
-static int32_t js320_fs_to_dwn_n(uint32_t fs, uint32_t * n_out) {
+// Map a requested host sample rate `fs` to the s/dwnN/N register value
+// plus the residual host decimation factor.  Native 16 MHz is first
+// divided by JS320_DECIMATE (16) to 1 MHz, then divided further
+// on-instrument by js320_signal_extra_factor(n) down to 1 kHz at most;
+// rates below that decimate the 1 kHz stream on the host with a sincN
+// filter matching s/dwnN/mode.  Returns 0 on success (*n_out and
+// *host_r_out written) or a jsdrv error code if `fs` does not
+// correspond to a supported value.
+static int32_t js320_fs_to_decimation(uint32_t fs, uint32_t * n_out, uint32_t * host_r_out) {
+    *host_r_out = 1U;
     if ((fs == 0U) || (fs > JS320_SIGNAL_RATE_AFTER_DECIMATE)) {
         return JSDRV_ERROR_PARAMETER_INVALID;
+    }
+    if (fs < JS320_MIN_ON_INSTRUMENT_FS) {
+        if ((JS320_MIN_ON_INSTRUMENT_FS % fs) != 0U) {
+            return JSDRV_ERROR_PARAMETER_INVALID;
+        }
+        *n_out = JS320_SIGNAL_RATE_AFTER_DECIMATE / JS320_MIN_ON_INSTRUMENT_FS;
+        *host_r_out = JS320_MIN_ON_INSTRUMENT_FS / fs;
+        return 0;
     }
     if ((JS320_SIGNAL_RATE_AFTER_DECIMATE % fs) != 0U) {
         return JSDRV_ERROR_PARAMETER_INVALID;
@@ -1010,16 +1275,12 @@ static int32_t js320_fs_to_dwn_n(uint32_t fs, uint32_t * n_out) {
     uint32_t extra = JS320_SIGNAL_RATE_AFTER_DECIMATE / fs;
     if (extra == 1U) {
         *n_out = 0U;
-    } else if (extra == 2U) {
-        *n_out = 2U;
-    } else if (extra == 3U) {
-        // gateware clamps 3 to factor 2, which would produce a rate that
+    } else if (extra <= 3U) {
+        // gateware clamps 2 & 3 to factor 4, which would produce a rate that
         // disagrees with the user's request.  Reject to avoid a silent mismatch.
         return JSDRV_ERROR_PARAMETER_INVALID;
-    } else if (extra <= 1000U) {
-        *n_out = extra;
     } else {
-        return JSDRV_ERROR_PARAMETER_INVALID;
+        *n_out = extra;
     }
     return 0;
 }
@@ -1041,18 +1302,22 @@ static bool handle_cmd(struct js320_drv_s * self,
         jsdrvp_mb_dev_send_return_code(dev, subtopic, rc);
         return true;
     } else if (0 == strcmp(subtopic, "h/fs")) {
-        // h/fs is a thin front-end for s/dwnN/N: translate the requested
-        // sample rate to the register value and hand off to the same
-        // code path.  Every side effect (device publish of s/dwnN/N,
-        // ack bookkeeping, port flush, smart-power reconcile) lives in
-        // js320_apply_signal_dwn_n so h/fs and s/dwnN/N stay in lockstep.
+        // h/fs is a front-end for s/dwnN/N plus the host residual
+        // decimation: translate the requested sample rate to the
+        // register value (and host factor for fs < 1 kHz) and hand off
+        // to the same code path.  Every side effect (device publish of
+        // s/dwnN/N, ack bookkeeping, port flush, host filter update,
+        // smart-power reconcile) lives in js320_apply_signal_dwn_n so
+        // h/fs and s/dwnN/N stay in lockstep.
         struct jsdrv_union_s v = *value;
         int32_t rc = jsdrv_union_as_type(&v, JSDRV_UNION_U32);
         uint32_t n = 0U;
+        uint32_t host_r = 1U;
         if (0 == rc) {
-            rc = js320_fs_to_dwn_n(v.value.u32, &n);
+            rc = js320_fs_to_decimation(v.value.u32, &n, &host_r);
         }
         if (0 == rc) {
+            self->signal_host_factor = host_r;
             js320_apply_signal_dwn_n(self, dev, n);
         }
         jsdrvp_mb_dev_send_return_code(dev, subtopic, rc);
@@ -1075,6 +1340,7 @@ static bool handle_cmd(struct js320_drv_s * self,
         } else if (value->type == JSDRV_UNION_F32) {
             self->i_scale = (double) value->value.f32;
         }
+        jsdrvp_mb_dev_send_return_code(dev, subtopic, 0);
         return true;
     } else if (0 == strcmp(subtopic, "h/v_scale")) {
         if (value->type == JSDRV_UNION_F64) {
@@ -1082,6 +1348,7 @@ static bool handle_cmd(struct js320_drv_s * self,
         } else if (value->type == JSDRV_UNION_F32) {
             self->v_scale = (double) value->value.f32;
         }
+        jsdrvp_mb_dev_send_return_code(dev, subtopic, 0);
         return true;
     } else if (0 == strcmp(subtopic, "s/dwnN/N")) {
         // Track the device-side i/v/p decimation factor and forward
@@ -1089,10 +1356,33 @@ static bool handle_cmd(struct js320_drv_s * self,
         // the i/v/p ports + sbufs, starts the drop-until-ack window,
         // and sends s/dwnN/N to the device.  Return true (we have
         // forwarded explicitly via the helper) with an explicit rc.
+        // The raw register interface never engages host decimation;
+        // only h/fs sets a residual host factor.
         struct jsdrv_union_s v = *value;
         int32_t rc = jsdrv_union_as_type(&v, JSDRV_UNION_U32);
+        if ((0 == rc) && (v.value.u32 > 1000U)) {
+            // register max; larger values silently produce a rate the
+            // host reports but the gateware does not deliver
+            rc = JSDRV_ERROR_PARAMETER_INVALID;
+        }
         if (0 == rc) {
+            self->signal_host_factor = 1U;
             js320_apply_signal_dwn_n(self, dev, v.value.u32);
+        }
+        jsdrvp_mb_dev_send_return_code(dev, subtopic, rc);
+        return true;
+    } else if (0 == strcmp(subtopic, "s/dwnN/mode")) {
+        // Track the i/v/p decimation filter mode (0=bypass, 1..3=sincN)
+        // and forward through the shared apply helper.  Bypass streams
+        // 1 Msps regardless of N, so the host must track the mode to
+        // report the correct decimate_factor.
+        struct jsdrv_union_s v = *value;
+        int32_t rc = jsdrv_union_as_type(&v, JSDRV_UNION_U32);
+        if ((0 == rc) && (v.value.u32 > 3U)) {
+            rc = JSDRV_ERROR_PARAMETER_INVALID;
+        }
+        if (0 == rc) {
+            js320_apply_signal_dwn_mode(self, dev, v.value.u32);
         }
         jsdrvp_mb_dev_send_return_code(dev, subtopic, rc);
         return true;
@@ -1101,6 +1391,9 @@ static bool handle_cmd(struct js320_drv_s * self,
         // 3=majority) and forward through the shared apply helper.
         struct jsdrv_union_s v = *value;
         int32_t rc = jsdrv_union_as_type(&v, JSDRV_UNION_U32);
+        if ((0 == rc) && (v.value.u32 > 3U)) {
+            rc = JSDRV_ERROR_PARAMETER_INVALID;
+        }
         if (0 == rc) {
             js320_apply_gpi_dwn_mode(self, dev, v.value.u32);
         }
@@ -1143,21 +1436,29 @@ static bool js320_handle_publish(struct jsdrvp_mb_drv_s * drv,
                                   const struct jsdrv_union_s * value) {
     struct js320_drv_s * self = (struct js320_drv_s *) drv;
 
-    // Sensor-ready interlock: any publish from the `s/...` subtree is
-    // proof that the sensor task's pubsub is running, and state_fetch
-    // can now proceed without hitting BUSY.
-    if (self->waiting_for_sensor && (subtopic[0] == 's') && (subtopic[1] == '/')) {
-        JSDRV_LOGI("sensor ready: %s", subtopic);
-        self->waiting_for_sensor = false;
-        jsdrvp_mb_dev_set_timeout(dev, 0);
-        jsdrvp_mb_dev_state_fetch_start(dev);
-        // Trigger sensor timesync resync so s/ts/!map arrives
-        // promptly.  The sensor-side comm link stays up across
-        // host reconnects, so ./comm/./!add only fires 
-        // on the first open.  This explicit resync forces map update.
-        jsdrvp_mb_dev_publish_to_device(dev, "s/ts/!resync",
-            &jsdrv_union_u8_r(1));
-        // fall through; we want the frontend to see this publish too
+    // Sensor-ready interlock: the ctrl firmware reports the sensor comm
+    // link state on c/comm/sensor/state (0=down, 1=up).  Cache every
+    // update -- even when not waiting -- so open_children can detect a
+    // link that came up before the watch was armed.  The link is torn
+    // down on host close and re-established on open, so a 0->1 transition
+    // fires on every open; when we are waiting, sync `s` on that live
+    // transition (the already-up case is handled in open_children).
+    if (0 == strcmp(subtopic, "c/comm/sensor/state")) {
+        struct jsdrv_union_s v = *value;
+        if (0 == jsdrv_union_as_type(&v, JSDRV_UNION_U32)) {
+            self->sensor_link_up = (v.value.u32 != 0);
+            if (self->waiting_for_sensor && self->sensor_link_up) {
+                JSDRV_LOGI("sensor ready: c/comm/sensor/state=1");
+                if (!js320_sensor_sync_start(self, dev)) {
+                    // A sequence is still running, so the sync could not
+                    // start on this one-shot 0->1 transition.  The cached
+                    // state stays set; on_timeout backstops.
+                    JSDRV_LOGW("sensor ready but 's' sync busy; "
+                               "on_timeout will complete open without sensor sync");
+                }
+            }
+        }
+        // fall through; the frontend should still see this publish
     }
 
     // Firmware acknowledgment that a dwnN change has taken effect.
@@ -1193,16 +1494,41 @@ static bool js320_handle_publish(struct jsdrvp_mb_drv_s * drv,
     return js320_cal_handle_publish(self->cal, subtopic, value);
 }
 
+// Called after a deferred-open child instance sync completes.  After the
+// sensor 's' device instance, restore the host-side 'h' instance (h/fp,
+// h/fs, h/i_scale, h/v_scale) from the host cache so the driver's internal
+// state matches -- applied AFTER 's' so a host-cached h/fs wins over the
+// sensor sync's s/dwnN/N -- then complete the open.
+static void js320_on_instance_synced(struct jsdrvp_mb_drv_s * drv,
+                                     struct jsdrvp_mb_dev_s * dev, char prefix) {
+    (void) drv;
+    if (prefix == 's') {
+        // Restore the tracked s/dwnN registers (N + mode) from the host
+        // cache, which the sensor sync just populated with the device's
+        // current values.  Runs BEFORE the 'h' replay so a cached h/fs
+        // is applied with the correct mode.
+        jsdrvp_mb_dev_topic_replay(dev, "s/dwnN");
+        jsdrvp_mb_dev_host_replay(dev, 'h');
+        jsdrvp_mb_dev_open_complete(dev);
+    }
+}
+
 static void js320_on_timeout(struct jsdrvp_mb_drv_s * drv,
                               struct jsdrvp_mb_dev_s * dev) {
     struct js320_drv_s * self = (struct js320_drv_s *) drv;
     if (self->waiting_for_sensor) {
-        // Sensor never published within JS320_SENSOR_READY_TIMEOUT_NS.
-        // Proceed with state_fetch anyway; GET_INIT BUSY retry will
-        // backstop if the firmware is genuinely still booting.
-        JSDRV_LOGW("sensor ready timeout, proceeding to state_fetch");
+        // c/comm/sensor/state never reached 1 within the timeout: the
+        // sensor is (probably) down.  Skip the sensor sync but still
+        // restore the host-side 'h' state, then complete the deferred
+        // open so OPEN# fires and the UI can run a firmware update.  With
+        // the level-triggered open_children check a present sensor never
+        // reaches here; this only backstops a genuinely-absent sensor and
+        // fires at JS320_SENSOR_READY_TIMEOUT_NS (0.5 s), well within the
+        // caller's open timeout.
+        JSDRV_LOGW("sensor ready timeout; completing open without sensor sync");
         self->waiting_for_sensor = false;
-        jsdrvp_mb_dev_state_fetch_start(dev);
+        jsdrvp_mb_dev_host_replay(dev, 'h');
+        jsdrvp_mb_dev_open_complete(dev);
     }
     js320_ack_timeout_check(&self->signal_ack, dev, "s/dwnN");
     js320_ack_timeout_check(&self->gpi_ack,    dev, "s/gpi/+/dwnN");
@@ -1214,6 +1540,10 @@ static void js320_on_timeout(struct jsdrvp_mb_drv_s * drv,
 static void js320_finalize(struct jsdrvp_mb_drv_s * drv) {
     struct js320_drv_s * self = (struct js320_drv_s *) drv;
     JSDRV_LOGI("JS320 driver finalized");
+    for (uint8_t ch = 5U; ch <= 7U; ++ch) {
+        jsdrv_downsample_sinc_free(self->ports[ch].host_filter);
+        self->ports[ch].host_filter = NULL;
+    }
     js320_fwup_free(self->fwup);
     js320_jtag_free(self->jtag);
     js320_cal_free(self->cal);
@@ -1229,6 +1559,8 @@ static int32_t js320_drv_factory(struct jsdrvp_mb_drv_s ** drv) {
     self->fs = JS320_FS_DEFAULT;
     self->publish_rate = JS320_PUB_RATE_DEFAULT;
     self->signal_dwn_n = JS320_DEFAULT_SIGNAL_DWN_N;
+    self->signal_dwn_mode = JS320_DEFAULT_SIGNAL_DWN_MODE;
+    self->signal_host_factor = 1U;
     self->gpi_dwn_mode = JS320_DEFAULT_GPI_DWN_MODE;
     self->gpi_dwn_n = JS320_DEFAULT_GPI_DWN_N;
     js320_sbufs_clear(self);
@@ -1244,8 +1576,8 @@ static int32_t js320_drv_factory(struct jsdrvp_mb_drv_s ** drv) {
     self->drv.handle_cmd = js320_handle_cmd;
     self->drv.handle_publish = js320_handle_publish;
     self->drv.on_timeout = js320_on_timeout;
-    self->drv.state_fetch_prefixes = js320_state_fetch_prefixes;
-    self->drv.open_ready = js320_open_ready;
+    self->drv.open_children = js320_open_children;
+    self->drv.on_instance_synced = js320_on_instance_synced;
     self->drv.finalize = js320_finalize;
     *drv = &self->drv;
     return 0;

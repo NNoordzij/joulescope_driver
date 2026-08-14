@@ -323,10 +323,10 @@ struct jsdrv_statistics_s {
     uint8_t version;             ///< The version, only 1 currently supported
     uint8_t rsv1_u8;             ///< Reserved = 0
     uint8_t rsv2_u8;             ///< Reserved = 0
-    uint8_t decimate_factor;     ///< The decimate factor from sample_id to calculated samples.
+    uint8_t decimate_factor;     ///< The decimate factor from sample_id to calculated samples, saturated at 255.  Prefer decimate_factor32.
     uint32_t block_sample_count; ///< Samples used to compute this block, in decimated samples.
     uint32_t sample_freq;        ///< The samples per second for *_sample_id (undecimated)
-    uint32_t rsv3_u32;           ///< Reserved = 0
+    uint32_t decimate_factor32;  ///< The decimate factor from sample_id to calculated samples (was reserved; 0 in payloads from older producers - fall back to decimate_factor).
     uint64_t block_sample_id;    ///< First sample in this block's statistics computation.
     uint64_t accum_sample_id;    ///< First sample in the integration statistics computation.
     double i_avg;                ///< The average current over the block.

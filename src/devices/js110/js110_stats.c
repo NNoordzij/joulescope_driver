@@ -27,7 +27,7 @@ static void clear(struct js110_stats_s * self) {
         f->avg = 0.0;
         f->std = 0.0;
         f->min = FLT_MAX;
-        f->max = FLT_MIN;
+        f->max = -FLT_MAX;
         f->x1 = 0;
         f->x2.u64[0] = 0;
         f->x2.u64[1] = 0;
@@ -39,6 +39,7 @@ void js110_stats_initialize(struct js110_stats_s * self) {
     struct jsdrv_statistics_s * s = &self->statistics;
     s->version = 1;
     s->decimate_factor = 1;
+    s->decimate_factor32 = 1;
     s->block_sample_count = 1000000;
     s->sample_freq = 2000000;
     js110_stats_clear(self);
@@ -53,6 +54,7 @@ void js110_stats_clear(struct js110_stats_s * self) {
     self->energy.u64[1] = 0;
     struct jsdrv_statistics_s * s = &self->statistics;
     s->decimate_factor = 1;
+    s->decimate_factor32 = 1;
     s->block_sample_id = 0;
     s->accum_sample_id = 0;
     clear(self);
@@ -79,6 +81,13 @@ static void update(struct js110_stats_field_s * f, float x) {
 }
 
 static void finalize(struct js110_stats_field_s * f, uint32_t sample_count) {
+    if (0 == sample_count) {  // all samples in the block were NaN
+        f->avg = NAN;
+        f->std = NAN;
+        f->min = NAN;
+        f->max = NAN;
+        return;
+    }
     f->avg /= sample_count;
     f->std = js220_i128_compute_std(f->x1, f->x2, sample_count, 31);
 }

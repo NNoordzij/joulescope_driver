@@ -210,20 +210,27 @@ class Record:
                 serial_number=serial_number,
             )
 
-            for signal in self._signals.values():
-                data_topic = signal['data_topic_abs']
-                self._data_map[data_topic] = signal
-                self._driver.subscribe(data_topic, ['pub'], self._on_data_fn)
+        # self._signals already holds one entry per (device, signal);
+        # subscribe and enable each exactly once
+        for signal in self._signals.values():
+            data_topic = signal['data_topic_abs']
+            self._data_map[data_topic] = signal
+            self._driver.subscribe(data_topic, ['pub'], self._on_data_fn)
 
-            if 'signal_enable' in self._auto:
-                for signal in self._signals.values():
-                    ctrl_topic = signal['ctrl_topic_abs']
-                    self._driver.publish(ctrl_topic, 1, timeout=0)
+        if 'signal_enable' in self._auto:
+            for signal in self._signals.values():
+                ctrl_topic = signal['ctrl_topic_abs']
+                self._driver.publish(ctrl_topic, 1, timeout=0)
 
         return self
 
     def close(self):
-        """Close the recording and release all resources."""
+        """Close the recording and release all resources.
+
+        Safe to call repeatedly and after a failed :meth:`open`.
+        """
+        if self._wr is None:
+            return
         try:
             for signal in self._signals.values():
                 self._driver.unsubscribe(signal['data_topic_abs'], self._on_data_fn)
@@ -273,4 +280,17 @@ class Record:
         x = value['data']
         if len(x):
             x = np.ascontiguousarray(x)
-            self._wr.fsr_f32(signal_id, sample_id, x)
+            signal_type = signal['signal_type']
+            if signal_type == DataType.F32:
+                self._wr.fsr_f32(signal_id, sample_id, x)
+            elif signal_type == DataType.U4:
+                # the driver provides u4 unpacked (one sample per byte);
+                # pyjls fsr requires packed little-endian nibbles
+                if len(x) & 1:
+                    x = np.concatenate((x, np.zeros(1, dtype=np.uint8)))
+                x = ((x[1::2] & 0x0f) << 4) | (x[0::2] & 0x0f)
+                self._wr.fsr(signal_id, sample_id, np.ascontiguousarray(x))
+            else:
+                # u1: the driver data is already packed little-endian;
+                # the JLS writer resolves any byte-padding overlap
+                self._wr.fsr(signal_id, sample_id, x)

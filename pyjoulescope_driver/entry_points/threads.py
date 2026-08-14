@@ -42,11 +42,13 @@ def parser_config(p):
 
 
 def _device_get(d):
-    devices_paths = d.device_paths()
+    # this demonstration uses the h/timeout debug topic, which only the
+    # JS220 implements
+    devices_paths = [p for p in d.device_paths() if '/js220/' in p]
     if len(devices_paths) == 1:
         return devices_paths[0]
     if len(devices_paths) == 0:
-        print('No devices found')
+        print('No JS220 devices found (h/timeout is JS220-only)')
         return None
     elif len(devices_paths) > 1:
         device_path = devices_paths[0]

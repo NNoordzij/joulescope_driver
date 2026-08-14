@@ -174,6 +174,45 @@ static struct jsdrv_time_map_s * construct(size_t count) {
     return e;
 }
 
+static void test_expire_then_query(void **state) {
+    // After expire advances the tail (and later adds wrap the ring), the
+    // interpolated searches must index relative to tail and terminate.
+    (void) state;
+    struct jsdrv_tmap_s * s = jsdrv_tmap_alloc(8);
+    struct jsdrv_time_map_s entry = {.offset_time = 0, .offset_counter = 0, .counter_rate = 1000.0};
+    int64_t t = 0;
+
+    for (uint64_t n = 0; n < 100; ++n) {
+        entry.offset_time = YEAR + ((int64_t) n) * SECOND;
+        entry.offset_counter = n * 1000;
+        jsdrv_tmap_add(s, &entry);
+    }
+    jsdrv_tmap_expire_by_sample_id(s, 50 * 1000);
+    assert_true(jsdrv_tmap_length(s) <= 50);
+
+    for (uint64_t n = 50; n < 100; ++n) {
+        uint64_t sample_id = n * 1000 + 500;
+        assert_int_equal(0, jsdrv_tmap_sample_id_to_timestamp(s, sample_id, &t));
+        assert_int_equal(YEAR + ((int64_t) n) * SECOND + SECOND / 2, t);
+        uint64_t k = 0;
+        assert_int_equal(0, jsdrv_tmap_timestamp_to_sample_id(s, t, &k));
+        assert_int_equal(sample_id, k);
+    }
+
+    // adding after expire wraps the ring across the expired region
+    for (uint64_t n = 100; n < 150; ++n) {
+        entry.offset_time = YEAR + ((int64_t) n) * SECOND;
+        entry.offset_counter = n * 1000;
+        jsdrv_tmap_add(s, &entry);
+    }
+    for (uint64_t n = 50; n < 150; ++n) {
+        uint64_t sample_id = n * 1000 + 500;
+        assert_int_equal(0, jsdrv_tmap_sample_id_to_timestamp(s, sample_id, &t));
+        assert_int_equal(YEAR + ((int64_t) n) * SECOND + SECOND / 2, t);
+    }
+    jsdrv_tmap_free(s);
+}
+
 static void test_wrap(void **state) {
     (void) state;
     struct jsdrv_tmap_s * s = jsdrv_tmap_alloc(8);
@@ -371,6 +410,7 @@ int main(void) {
             cmocka_unit_test(test_add_duplicate),
             cmocka_unit_test(test_multiple),
             cmocka_unit_test(test_expire),
+            cmocka_unit_test(test_expire_then_query),
             cmocka_unit_test(test_wrap),
             cmocka_unit_test(test_grow),
             cmocka_unit_test(test_clear),

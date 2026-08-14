@@ -48,6 +48,38 @@ const char * META_NO_DEFAULT = "{"
     "\"brief\": \"Number selection.\""
 "}";
 
+const char * META_F32 = "{"
+    "\"dtype\": \"f32\","
+    "\"brief\": \"A scale factor.\","
+    "\"default\": 1.0"
+"}";
+
+const char * META_F64 = "{"
+    "\"dtype\": \"f64\","
+    "\"brief\": \"A scale factor.\","
+    "\"default\": 1.0"
+"}";
+
+static void test_float_dtype(void **state) {
+    (void) state;
+    uint8_t dtype = 0;
+    struct jsdrv_union_s value;
+
+    assert_int_equal(0, jsdrv_meta_dtype(META_F32, &dtype));
+    assert_int_equal(JSDRV_UNION_F32, dtype);
+    assert_int_equal(0, jsdrv_meta_dtype(META_F64, &dtype));
+    assert_int_equal(JSDRV_UNION_F64, dtype);
+
+    // A value for a float-typed topic must validate (no options/range):
+    // dtype_lookup must know "f32"/"f64", else jsdrv_meta_value rejects it.
+    value = jsdrv_union_f32(2.0f);
+    assert_int_equal(0, jsdrv_meta_value(META_F32, &value));
+    value = jsdrv_union_f64(2.0);
+    assert_int_equal(0, jsdrv_meta_value(META_F32, &value));  // f64 host value, f32 meta
+    value = jsdrv_union_f64(2.0);
+    assert_int_equal(0, jsdrv_meta_value(META_F64, &value));
+}
+
 static void test_basic(void **state) {
     (void) state;
     uint8_t dtype = 0;
@@ -83,6 +115,27 @@ static void test_value(void **state) {
 
     value = cstr("__invalid__");
     assert_int_equal(JSDRV_ERROR_PARAMETER_INVALID, jsdrv_meta_value(META1, &value));
+}
+
+static void test_range_too_long_rejected(void **state) {
+    // range must be [v_min, v_max] or [v_min, v_max, v_step]; a longer
+    // array previously overflowed the internal 3-entry parse buffer.
+    (void) state;
+    static const char * META_RANGE_BAD =
+        "{"
+        "\"dtype\": \"u32\","
+        "\"range\": [0, 100, 1, 2, 3, 4, 5, 6, 7, 8]"
+        "}";
+    struct jsdrv_union_s value = jsdrv_union_u32(10);
+    assert_int_equal(JSDRV_ERROR_PARAMETER_INVALID, jsdrv_meta_value(META_RANGE_BAD, &value));
+
+    static const char * META_RANGE_OK =
+        "{"
+        "\"dtype\": \"u32\","
+        "\"range\": [0, 100, 2]"
+        "}";
+    value = jsdrv_union_u32(10);
+    assert_int_equal(0, jsdrv_meta_value(META_RANGE_OK, &value));
 }
 
 static void test_no_default(void **state) {
@@ -203,6 +256,8 @@ int main(void) {
     const struct CMUnitTest tests[] = {
             cmocka_unit_test(test_basic),
             cmocka_unit_test(test_value),
+            cmocka_unit_test(test_float_dtype),
+            cmocka_unit_test(test_range_too_long_rejected),
             cmocka_unit_test(test_no_default),
             cmocka_unit_test(test_flags_none),
             cmocka_unit_test(test_flags_no_flags_key),

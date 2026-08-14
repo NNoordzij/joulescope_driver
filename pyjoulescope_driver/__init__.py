@@ -17,11 +17,11 @@ from . import time64
 from .record import Record
 from .stdmsg import StdMsg
 from .mem_client import MemClient
-from .binding import Driver, ElementType, Field, ErrorCode, LogLevel, SubscribeFlags, calibration_hash
+from .binding import Driver, ElementType, Field, ErrorCode, LogLevel, SubscribeFlags, TimeMap, calibration_hash
 
 
 __all__ = [
-    'Driver', 'MemClient', 'Record', 'StdMsg',
+    'Driver', 'MemClient', 'Record', 'StdMsg', 'TimeMap',
     'ElementType', 'Field', 'ErrorCode', 'LogLevel', 'SubscribeFlags',
     'calibration_hash',
     'time64',

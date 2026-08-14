@@ -48,12 +48,19 @@ ADD_CMOCKA_TEST(cstr_test)
 add_executable(dbc_test dbc_test.c)
 add_dependencies(dbc_test cmocka)
 target_link_libraries(dbc_test cmocka)
+add_test(dbc_test ${CMAKE_CURRENT_BINARY_DIR}/dbc_test)
+
+# built in example/, registered here (enable_testing scope);
+# the NAME/COMMAND form resolves the target to its executable path
+add_test(NAME boot_info_test COMMAND boot_info_test)
 
 ADD_CMOCKA_TEST(downsample_test)
+ADD_CMOCKA_TEST(downsample_sinc_test)
 ADD_CMOCKA_TEST(error_code_test)
 ADD_CMOCKA_DEVICE_TEST(js110 js110_cal_test)
 ADD_CMOCKA_DEVICE_TEST(js220 js220_i128_test)
 ADD_CMOCKA_DEVICE_TEST(js110 js110_sp_test)
+ADD_CMOCKA_DEVICE_TEST(js110 js110_stats_test)
 ADD_CMOCKA_DEVICE_TEST(js220 js220_stats_test)
 ADD_CMOCKA_TEST(json_test)
 ADD_CMOCKA_TEST(log_test)
@@ -73,6 +80,11 @@ ADD_CMOCKA_TEST(union_test)
 ADD_CMOCKA_TEST(version_test)
 
 ADD_CMOCKA_TEST(os_test)
+
+add_executable(msg_queue_test msg_queue_test.c)
+add_dependencies(msg_queue_test jsdrv_support_objlib tinyprintf cmocka)
+target_link_libraries(msg_queue_test jsdrv_support_objlib tinyprintf cmocka)
+add_test(msg_queue_test ${CMAKE_CURRENT_BINARY_DIR}/msg_queue_test)
 
 add_executable(pubsub_test pubsub_test.c)
 add_dependencies(pubsub_test jsdrv_support_objlib tinyprintf cmocka)
@@ -103,6 +115,15 @@ add_executable(js320_drv_test devices/js320/js320_drv_test.c)
 add_dependencies(js320_drv_test jsdrv_support_objlib tinyprintf cmocka)
 target_link_libraries(js320_drv_test jsdrv_support_objlib tinyprintf cmocka)
 add_test(js320_drv_test ${CMAKE_CURRENT_BINARY_DIR}/js320_drv_test)
+
+# mb_device_test includes the device source directly (js320_drv_test
+# pattern) and stubs the frontend services; msg_queue, cstr/topic/union,
+# meta, and posix come real from jsdrv_support_objlib.  The clock is
+# test-owned via a jsdrv_time_utc rename at include time.
+add_executable(mb_device_test devices/mb_device/mb_device_test.c)
+add_dependencies(mb_device_test jsdrv_support_objlib tinyprintf cmocka)
+target_link_libraries(mb_device_test jsdrv_support_objlib tinyprintf cmocka)
+add_test(mb_device_test ${CMAKE_CURRENT_BINARY_DIR}/mb_device_test)
 
 add_executable(frontend_test frontend_test.c
         ../src/buffer.c

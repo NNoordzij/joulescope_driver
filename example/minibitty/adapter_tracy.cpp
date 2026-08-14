@@ -19,6 +19,7 @@
 
 #include "adapter_tracy.h"
 #include "adapter.h"
+#include "mbgen.h"
 //#include "tracy/tracy/TracyC.h"
 //#include "tracy/client/TracyProfiler.hpp"
 //#include "tracy/common/TracyColor.hpp"
@@ -66,10 +67,25 @@ struct adapter_tracy_s {
 
 namespace tracy
 {
+
+// This file hand-implements the Tracy client wire protocol.  These
+// tripwires force a re-audit whenever the vendored Tracy headers move
+// to a new protocol version.
+static_assert(ProtocolVersion == 76, "Tracy wire protocol changed - re-audit adapter_tracy.cpp");
+static_assert(sizeof(WelcomeMessage) == 1170, "Tracy WelcomeMessage layout changed - re-audit adapter_tracy.cpp");
+
+// zone/message colors as 0xRRGGBB, serialized as b, g, r bytes on the wire
+#define COLOR_TASK          (0x2E7DD1)  // blue
+#define COLOR_ISR           (0xD97A29)  // orange
+#define COLOR_MSG_ERROR     (0xE05252)  // red: emergency .. error
+#define COLOR_MSG_WARNING   (0xE8B84B)  // amber: warning
+#define COLOR_MSG_INFO      (0x8BC34A)  // green: notice, info
+#define COLOR_MSG_DEBUG     (0x9E9E9E)  // gray: debug1 .. debug3
+
 class Profiler {
 
 public:
-    Profiler(jsdrv_context_s * context);
+    Profiler(jsdrv_context_s * context, const struct mbgen_s * mbgen, bool verbose_name);
     ~Profiler();
     void StartWorker();
     void on_trace(const struct jsdrv_union_s * value);
@@ -137,13 +153,104 @@ private:
         buf_ptr(str, sz_u16);
     }
 
+    // Tracy zones on a thread must strictly nest (LIFO): the server pops its
+    // zone stack on every ZoneEnd and terminates the session if the
+    // ZoneValidation id does not match the top of its stack.  The device
+    // trace stream does not guarantee pairing: events are dropped on trace
+    // buffer overflow, and zones may already be open when the host attaches.
+    // Mirror the server's stack here and only emit ends that match it.
+    bool zone_begin(uint64_t srcloc, int64_t time) {
+        if (m_zone_depth >= ZONE_STACK_MAX) {
+            return false;  // drop; exit will be dropped as unmatched
+        }
+        if (m_zone_depth && (time < m_zone_stack[m_zone_depth - 1].begin_time)) {
+            time = m_zone_stack[m_zone_depth - 1].begin_time;  // keep nesting times sane
+        }
+        zone_entry_s & e = m_zone_stack[m_zone_depth++];
+        e.srcloc = srcloc;
+        e.zone_id = m_zone_id++;
+        e.begin_time = time;
+        buf_header(QueueType::ZoneValidation);
+        buf_u32(e.zone_id);
+        buf_header(QueueType::ZoneBegin);
+        buf_reftime(time);
+        buf_u64(srcloc);
+        return true;
+    }
+
+    void zone_end_top(int64_t time) {
+        zone_entry_s & e = m_zone_stack[--m_zone_depth];
+        if (time < e.begin_time) {
+            time = e.begin_time;  // zone spans must be non-negative
+        }
+        buf_header(QueueType::ZoneValidation);
+        buf_u32(e.zone_id);
+        buf_header(QueueType::ZoneEnd);
+        buf_reftime(time);
+    }
+
+    void zone_end(uint64_t srcloc, int64_t time) {
+        for (uint32_t idx = m_zone_depth; idx > 0; --idx) {
+            if (m_zone_stack[idx - 1].srcloc == srcloc) {
+                while (m_zone_depth > idx) {
+                    zone_end_top(time);  // exits lost; close to keep LIFO
+                }
+                zone_end_top(time);
+                return;
+            }
+        }
+        // no matching begin (zone opened before host attach, or enter lost)
+    }
+
+    void zone_flush(int64_t time) {
+        while (m_zone_depth) {
+            zone_end_top(time);
+        }
+    }
+
     void buf_source_location(uint64_t srcloc) {
+        uint32_t obj_class = (uint32_t) (srcloc >> 32);
+        uint32_t color = 0x000000;
+        if (obj_class == 1) {
+            color = COLOR_TASK;
+        } else if (obj_class == 2) {
+            color = COLOR_ISR;
+        }
         buf_header(QueueType::SourceLocation);
-        buf_u64(4);  // name
-        buf_u64(8);  // function
-        buf_u64(12); // file
+        // The srcloc encodes the object class and id, so use it directly as
+        // the name/function string pointers; ServerQueryString decodes it.
+        buf_u64(srcloc);  // name
+        buf_u64(srcloc);  // function
+        buf_u64(3);       // file
         buf_u32(srcloc & 0xffff); // line
-        buf_color(0x000000);
+        buf_color(color);
+    }
+
+    void buf_log_message(int64_t time, uint32_t level, uint32_t file_id, uint32_t line,
+                         const uint32_t * args, uint32_t arg_count) {
+        char text[256];
+        mbgen_log_line(m_mbgen, text, sizeof(text), level, file_id, line, args, arg_count);
+        size_t sz = strlen(text);
+        uint32_t color;
+        if (level <= 3) {           // emergency .. error
+            color = COLOR_MSG_ERROR;
+        } else if (level == 4) {    // warning
+            color = COLOR_MSG_WARNING;
+        } else if (level <= 6) {    // notice, info
+            color = COLOR_MSG_INFO;
+        } else {                    // debug
+            color = COLOR_MSG_DEBUG;
+        }
+        // SingleStringData must immediately precede the message item;
+        // the server pairs them when processing MessageColor.
+        buf_header(QueueType::SingleStringData);
+        buf_u16((uint16_t) sz);
+        buf_ptr(text, (uint32_t) sz);
+        buf_header(QueueType::MessageColor);
+        buf_u64((uint64_t) time);  // absolute time, not reftime
+        buf_u8(color & 0xff);          // b
+        buf_u8((color >> 8) & 0xff);   // g
+        buf_u8((color >> 16) & 0xff);  // r
     }
 
     bool SendData() {
@@ -168,19 +275,29 @@ private:
     LZ4_stream_t * m_stream;
     msg_queue_s * m_queue;
     jsdrv_context_s * m_context;
+    const struct mbgen_s * m_mbgen;
+    bool m_verbose_name;
     uint8_t m_buf[TargetFrameSize * 3];     // total buffer size
     uint8_t * m_buf_start;  // current buffer block start, need to preserve 64 kB for LZ4_compress_fast_continue
     uint8_t * m_buf_ptr;    // current buffer insertion location
     uint8_t m_lz4[LZ4Size + sizeof(lz4sz_t)];
     time_u m_time;
+    uint32_t m_counter_prev;
     int64_t m_reftime;
     bool m_quit;
     uint32_t m_zone_id;
-    uint32_t m_task_zone_id[256];
-    uint32_t m_isr_zone_id[256];
+
+    struct zone_entry_s {
+        uint64_t srcloc;
+        uint32_t zone_id;
+        int64_t begin_time;
+    };
+    static const uint32_t ZONE_STACK_MAX = 64;
+    zone_entry_s m_zone_stack[ZONE_STACK_MAX];
+    uint32_t m_zone_depth;
 };
 
-Profiler::Profiler(jsdrv_context_s * context)
+Profiler::Profiler(jsdrv_context_s * context, const struct mbgen_s * mbgen, bool verbose_name)
     : m_epoch( std::chrono::duration_cast<std::chrono::seconds>( std::chrono::system_clock::now().time_since_epoch() ).count() )
     , m_sock( nullptr )
     , m_broadcast( nullptr )
@@ -188,10 +305,14 @@ Profiler::Profiler(jsdrv_context_s * context)
     , m_stream(LZ4_createStream())
     , m_queue(msg_queue_init())
     , m_context(context)
+    , m_mbgen(mbgen)
+    , m_verbose_name(verbose_name)
     , m_time()
+    , m_counter_prev(0)
     , m_reftime(0)
     , m_quit(false)
     , m_zone_id(1)
+    , m_zone_depth(0)
 {
     memset(m_buf, 0x55, sizeof(m_buf));
     memset(m_lz4, 0x00, sizeof(m_lz4));
@@ -269,7 +390,6 @@ void Profiler::Worker() {
     welcome.timerMul = 10.0;  // scale to 1 GHz
     welcome.initBegin = 1;
     welcome.initEnd = 2;
-    welcome.delay = 16;
     welcome.resolution = 16;  // units?
     welcome.epoch = m_epoch;
     welcome.exectime = m_epoch;
@@ -362,6 +482,12 @@ void Profiler::Worker() {
         LZ4_resetStream( m_stream );
         m_sock->Send( &welcome, sizeof( welcome ) );
 
+        // The server starts each session with fresh state: zero reference
+        // time and an empty zone stack.  Zones already open on the device
+        // will have their exits dropped as unmatched.
+        m_reftime = 0;
+        m_zone_depth = 0;
+
         buf_header(QueueType::ThreadContext);
         buf_u32(THREAD_ID);
 
@@ -369,13 +495,18 @@ void Profiler::Worker() {
         while (!m_quit) {
             bool idle = true;
 
-            // process trace message queue
-            while ((m_buf_ptr - m_buf) < (TargetFrameSize * 2)) {
-                idle = false;
+            // Process the trace message queue.  Each LZ4 frame must
+            // decompress to at most TargetFrameSize: the server reads the
+            // compressed frame into a fixed LZ4Size buffer without length
+            // validation, so an oversized frame crashes it.  Stop well below
+            // the limit since one message expands to at most a few kB.
+            while (((m_buf_ptr - m_buf) < (TargetFrameSize * 2))
+                    && ((m_buf_ptr - m_buf_start) < (TargetFrameSize / 2))) {
                 jsdrvp_msg_s * msg = nullptr;
                 if (JSDRV_ERROR_TIMED_OUT == msg_queue_pop(m_queue, &msg, 0)) {
                     break;
                 }
+                idle = false;
                 ProcessTraceMessage(msg);
             }
             if (!SendData()) {
@@ -427,10 +558,13 @@ void Profiler::ProcessTraceMessage(jsdrvp_msg_s * msg) {
     while (p32 < p32_end) {
         if (MB_TRACE_SOF != (p32[0] & 0xff)) {
             JSDRV_LOGW("trace: invalid SOF");
+            // stream corruption: an unknown number of events were lost, so
+            // close all open zones to resynchronize.
+            zone_flush(m_time.time);
             while (MB_TRACE_SOF != (p32[0] & 0xff)) {
                 ++p32;
                 if (p32 >= p32_end) {
-                    return;
+                    goto done;
                 }
             }
         }
@@ -442,12 +576,14 @@ void Profiler::ProcessTraceMessage(jsdrvp_msg_s * msg) {
         uint32_t obj_id = metadata & 0x0fff;
         uint32_t counter = p32[1];  // 100 MHz = 10 ns, rollover every 43 seconds
         uint64_t srcloc;
-        if (counter < m_time.parts.l) {
-            ++m_time.parts.u;  // todo estimate using wall-clock time?
-            m_time.parts.l = counter;
-        } else {
-            m_time.parts.l = counter;
-        }
+        // Extend the 32-bit counter to 64 bits using a signed wraparound-aware
+        // delta.  This handles both true rollover and the small backward steps
+        // that occur when preempting ISRs commit trace records out of order;
+        // a simple "counter decreased" rollover test falsely adds 43 seconds
+        // on every backward step.
+        int32_t counter_delta = (int32_t) (counter - m_counter_prev);
+        m_counter_prev = counter;
+        m_time.time += counter_delta;
         p32 += 2;
         uint32_t file_id = 0;
         uint32_t line = 0;
@@ -461,54 +597,44 @@ void Profiler::ProcessTraceMessage(jsdrvp_msg_s * msg) {
                 JSDRV_LOGW("trace type invalid");
                 break;
             case MB_TRACE_TYPE_READY:
-                printf(COUNTER_FMT "%s.%d ready\n", counter, obj_name, obj_id);
+                // printf(COUNTER_FMT "%s.%d ready\n", counter, obj_name, obj_id);
                 break;
             case MB_TRACE_TYPE_ENTER: {
                 if (obj_type == MB_OBJ_TASK) {
                     srcloc = (1LLU << 32) | obj_id;
-                    m_task_zone_id[obj_id] = m_zone_id;
                 } else if (obj_type == MB_OBJ_ISR) {
                     srcloc = (2LLU << 32) | obj_id;
-                    m_isr_zone_id[obj_id] = m_zone_id;
                 } else {
                     JSDRV_LOGW("enter type invalid");
                     break;
                 }
-                buf_header(QueueType::ZoneValidation);
-                buf_u32(m_zone_id++);
-                buf_header(QueueType::ZoneBegin);
-                buf_reftime(m_time.time);
-                buf_u64(srcloc);
+                zone_begin(srcloc, m_time.time);
                 break;
             }
             case MB_TRACE_TYPE_EXIT:
                 if (length == 0) {
-                    uint32_t zone_id;
                     if (obj_type == MB_OBJ_TASK) {
-                        zone_id = m_task_zone_id[obj_id];
+                        srcloc = (1LLU << 32) | obj_id;
                     } else if (obj_type == MB_OBJ_ISR) {
-                        zone_id = m_isr_zone_id[obj_id];
+                        srcloc = (2LLU << 32) | obj_id;
                     } else {
                         JSDRV_LOGW("exit type invalid");
                         break;
                     }
-                    buf_header(QueueType::ZoneValidation);
-                    buf_u32(zone_id);
-                    buf_header(QueueType::ZoneEnd);
-                    buf_reftime(m_time.time);
+                    zone_end(srcloc, m_time.time);
                 } else if (length == 1) {
                     if (obj_type == MB_OBJ_ISR) {
-                        uint32_t zone_id = m_zone_id++;
-                        buf_header(QueueType::ZoneValidation);
-                        buf_u32(zone_id);
-                        buf_header(QueueType::ZoneBegin);
+                        // retroactive ISR zone: enter was not traced, so
+                        // synthesize a balanced begin/end pair back-dated by
+                        // the reported duration, clamped inside the parent.
                         srcloc = (2LLU << 32) | obj_id;
-                        buf_reftime(m_time.time - p32[0]);
-                        buf_u64(srcloc);
-                        buf_header(QueueType::ZoneValidation);
-                        buf_u32(zone_id);
-                        buf_header(QueueType::ZoneEnd);
-                        buf_reftime(m_time.time);
+                        int64_t begin = m_time.time - (int64_t) p32[0];
+                        if (m_zone_depth && (begin < m_zone_stack[m_zone_depth - 1].begin_time)) {
+                            begin = m_zone_stack[m_zone_depth - 1].begin_time;
+                        }
+                        if (zone_begin(srcloc, begin)) {
+                            zone_end_top(m_time.time);
+                        }
                     }
                 } else {
                     JSDRV_LOGW("exit length invalid");
@@ -527,16 +653,21 @@ void Profiler::ProcessTraceMessage(jsdrvp_msg_s * msg) {
             case MB_TRACE_TYPE_FAULT: break;
             case MB_TRACE_TYPE_VALUE: break;
             case MB_TRACE_TYPE_LOG:
-                //printf(COUNTER_FMT "LOG @ %d.%d\n", counter, file_id, line);
-                    break;
+                if ((nullptr != m_mbgen) && (length >= 1)) {
+                    buf_log_message(m_time.time, metadata, file_id, line, &p32[1], length - 1);
+                }
+                break;
             case MB_TRACE_TYPE_RSV13: break;
             case MB_TRACE_TYPE_RSV14: break;
             case MB_TRACE_TYPE_OVERFLOW:
-                //printf(COUNTER_FMT "OVERFLOW %d\n", counter, metadata);
-                    break;
+                // trace events were dropped: enter/exit pairing is no longer
+                // reliable, so close all open zones to resynchronize.
+                zone_flush(m_time.time);
+                break;
         }
         p32 += length;
     }
+done:
     jsdrvp_msg_free(m_context, msg);
 }
 
@@ -547,13 +678,35 @@ bool Profiler::HandleServerQuery() {
     }
 
     switch( payload.type ) {
-        case ServerQueryString:
-            if (payload.ptr == 0) {
-                buf_string_transfer(QueueType::StringData, payload.ptr, ""); // todo
-            } else {
-                buf_string_transfer(QueueType::StringData, payload.ptr, "hello"); // todo
+        case ServerQueryString: {
+            char name[96];
+            uint32_t obj_class = (uint32_t) (payload.ptr >> 32);
+            uint32_t obj_id = (uint32_t) (payload.ptr & 0xffffffff);
+            const char * mb_name = nullptr;
+            const char * cls = nullptr;
+            if (obj_class == 1) {
+                cls = "task";
+                mb_name = mbgen_task_name(m_mbgen, obj_id);
+            } else if (obj_class == 2) {
+                cls = "isr";
+                mb_name = mbgen_isr_name(m_mbgen, obj_id);
             }
+            if (nullptr != mb_name) {
+                if (m_verbose_name) {
+                    snprintf(name, sizeof(name), "%s (%s.%u)", mb_name, cls, obj_id);
+                } else {
+                    snprintf(name, sizeof(name), "%s", mb_name);
+                }
+            } else if (nullptr != cls) {
+                snprintf(name, sizeof(name), "%s.%u", cls, obj_id);
+            } else if (payload.ptr == 3) {
+                snprintf(name, sizeof(name), "minibitty");
+            } else {
+                name[0] = 0;
+            }
+            buf_string_transfer(QueueType::StringData, payload.ptr, name);
             break;
+        }
         case ServerQueryThreadString:
             buf_string_transfer(QueueType::ThreadName, payload.ptr, "main");
             break;
@@ -597,8 +750,10 @@ void adapter_tracy_on_trace(void * user_data, const char * topic, const struct j
     self->on_trace(value);
 }
 
-void * adapter_tracy_initialize(struct jsdrv_context_s * context) {
-    auto * profiler = new tracy::Profiler(context);
+void * adapter_tracy_initialize(struct jsdrv_context_s * context,
+                                const struct mbgen_s * mbgen,
+                                int verbose_name) {
+    auto * profiler = new tracy::Profiler(context, mbgen, 0 != verbose_name);
     profiler->StartWorker();
     return profiler;
 }

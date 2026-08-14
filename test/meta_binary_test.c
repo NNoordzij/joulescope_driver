@@ -278,6 +278,65 @@ static void test_last_page_unpadded(void ** state) {
 }
 
 
+static char json_meta_[2048];
+
+static void on_topic_capture(void * user_data, const char * topic,
+                             const char * json_meta) {
+    (void) user_data;
+    (void) topic;
+    snprintf(json_meta_, sizeof(json_meta_), "%s", json_meta);
+    ++topic_count_;
+}
+
+static void test_control_char_escaping(void ** state) {
+    (void) state;
+    // One topic whose detail contains a raw newline (multi-line YAML
+    // detail blocks store raw newlines in the blob string table).
+    // The reconstructed JSON must escape it.
+    uint8_t buf[72];
+    memset(buf, 0, sizeof(buf));
+    memcpy(buf, "MBtm_1.0", 8);
+    uint32_t total = sizeof(buf);
+    memcpy(buf + 12, &total, 4);
+    uint16_t topics = 1;
+    memcpy(buf + 16, &topics, 2);
+    uint16_t str_off = 48;
+    memcpy(buf + 18, &str_off, 2);
+
+    // Entry at offset 32: topic=str[0], brief=NONE, detail=str[1],
+    // dtype=u8, entry_size=16
+    uint16_t none = 0xFFFF;
+    uint16_t str_idx;
+    str_idx = 0;
+    memcpy(buf + 32 + 0, &str_idx, 2);   // topic_str_offset
+    memcpy(buf + 32 + 2, &none, 2);      // brief_str_offset
+    str_idx = 1;
+    memcpy(buf + 32 + 4, &str_idx, 2);   // detail_str_offset
+    buf[32 + 6] = 0x08;                  // dtype = u8
+    memcpy(buf + 32 + 8, &none, 2);      // format_str_offset
+    uint16_t entry_size = 16;
+    memcpy(buf + 32 + 10, &entry_size, 2);
+
+    // String table at offset 48: count=2, then offsets, then chars
+    uint16_t str_count = 2;
+    memcpy(buf + 48, &str_count, 2);
+    uint16_t char_off;
+    char_off = 0;
+    memcpy(buf + 48 + 8, &char_off, 2);  // "t"
+    char_off = 2;
+    memcpy(buf + 48 + 10, &char_off, 2); // "a\nb"
+    memcpy(buf + 60, "t\0a\nb\0", 6);    // string data at data_start=60
+
+    compute_check32(buf, total);
+
+    topic_count_ = 0;
+    json_meta_[0] = '\0';
+    assert_int_equal(0, meta_binary_parse(buf, sizeof(buf), on_topic_capture, NULL));
+    assert_int_equal(1, topic_count_);
+    assert_non_null(strstr(json_meta_, "\"detail\": \"a\\nb\""));
+    assert_null(strchr(json_meta_, '\n'));  // no raw control characters
+}
+
 int main(void) {
     const struct CMUnitTest tests[] = {
         cmocka_unit_test(test_null_blob),
@@ -295,6 +354,7 @@ int main(void) {
         cmocka_unit_test(test_check32_bit_flip),
         cmocka_unit_test(test_partially_written_blob),
         cmocka_unit_test(test_last_page_unpadded),
+        cmocka_unit_test(test_control_char_escaping),
     };
     return cmocka_run_group_tests(tests, NULL, NULL);
 }

@@ -53,7 +53,21 @@ static struct jsdrv_summary_entry_s * level_entry(struct bufsig_s * self, uint8_
     return &lvl->data[idx];
 }
 
-void jsdrv_bufsig_alloc(struct bufsig_s * self, uint64_t N, uint64_t r0, uint64_t rN) {
+bool jsdrv_bufsig_element_type_is_supported(uint8_t element_type, uint8_t element_size_bits) {
+    if (JSDRV_DATA_TYPE_FLOAT == element_type) {
+        return (32 == element_size_bits);
+    } else if (JSDRV_DATA_TYPE_UINT == element_type) {
+        return (1 == element_size_bits) || (4 == element_size_bits);
+    }
+    return false;
+}
+
+int32_t jsdrv_bufsig_alloc(struct bufsig_s * self, uint64_t N, uint64_t r0, uint64_t rN) {
+    if (!jsdrv_bufsig_element_type_is_supported(self->hdr.element_type, self->hdr.element_size_bits)) {
+        JSDRV_LOGE("jsdrv_bufsig_alloc %d unsupported element type=%d, size=%d bits",
+                   (int) self->idx, (int) self->hdr.element_type, (int) self->hdr.element_size_bits);
+        return JSDRV_ERROR_NOT_SUPPORTED;
+    }
     JSDRV_LOGI("jsdrv_bufsig_alloc %d N=%" PRIu64 ", r0=%" PRIu64", rN=%" PRIu64,
                (int) self->idx, N, r0, rN);
     self->N = N;
@@ -77,18 +91,9 @@ void jsdrv_bufsig_alloc(struct bufsig_s * self, uint64_t N, uint64_t r0, uint64_
     self->size_in_utc = JSDRV_F64_TO_TIME(size_in_utc);
 
     if (JSDRV_DATA_TYPE_FLOAT == self->hdr.element_type) {
-        JSDRV_ASSERT(self->hdr.element_size_bits == 32);
         self->level0_data = jsdrv_alloc(self->N * sizeof(float));
-    } else if (JSDRV_DATA_TYPE_UINT == self->hdr.element_type) {
-        if (1 == self->hdr.element_size_bits) {
-            self->level0_data = jsdrv_alloc((self->N * self->hdr.element_size_bits + 7) / 8);
-        } else if (4 == self->hdr.element_size_bits) {
-            self->level0_data = jsdrv_alloc((self->N * self->hdr.element_size_bits + 1) / 2);
-        } else {
-            JSDRV_ASSERT(false);
-        }
-    } else {
-        JSDRV_ASSERT(false);
+    } else {  // JSDRV_DATA_TYPE_UINT, 1 or 4 bits
+        self->level0_data = jsdrv_alloc((self->N * self->hdr.element_size_bits + 7) / 8);
     }
     self->level0_head = 0;
     self->level0_size = 0;
@@ -108,14 +113,15 @@ void jsdrv_bufsig_alloc(struct bufsig_s * self, uint64_t N, uint64_t r0, uint64_
         JSDRV_LOGD3("alloc lvl=%d %" PRIu64, i + 1, k);
         lvl->data = jsdrv_alloc(k * sizeof(struct jsdrv_summary_entry_s));
     }
+    return 0;
 }
 
 void jsdrv_bufsig_free(struct bufsig_s * self) {
     for (int i = 0; i < JSDRV_BUFSIG_LEVELS_MAX; ++i) {
         if (NULL != self->levels[i].data) {
             jsdrv_free(self->levels[i].data);
-            self->levels[i].data = NULL;
         }
+        memset(&self->levels[i], 0, sizeof(self->levels[i]));
     }
     if (self->level0_data) {
         JSDRV_LOGI("jsdrv_bufsig_free %d", (int) self->idx);
@@ -260,6 +266,43 @@ void jsdrv_bufsig_clear(struct bufsig_s * self) {
     clear(self, 0);
 }
 
+// Copy bits between LSB-first packed buffers.  Offsets are in bits.
+static void bits_copy(uint8_t * dst, uint64_t dst_bit, const uint8_t * src, uint64_t src_bit, uint64_t bit_count) {
+    while (bit_count) {
+        if ((0 == (dst_bit & 7)) && (0 == (src_bit & 7)) && (bit_count >= 8)) {
+            uint64_t byte_count = bit_count >> 3;
+            memcpy(&dst[dst_bit >> 3], &src[src_bit >> 3], byte_count);
+            dst_bit += byte_count << 3;
+            src_bit += byte_count << 3;
+            bit_count -= byte_count << 3;
+            continue;
+        }
+        uint8_t b = (src[src_bit >> 3] >> (src_bit & 7)) & 1;
+        uint8_t * d = &dst[dst_bit >> 3];
+        uint8_t mask = (uint8_t) (1 << (dst_bit & 7));
+        *d = b ? (*d | mask) : (*d & (uint8_t) ~mask);
+        ++dst_bit;
+        ++src_bit;
+        --bit_count;
+    }
+}
+
+// Zero bits in an LSB-first packed buffer.  Offset is in bits.
+static void bits_zero(uint8_t * dst, uint64_t dst_bit, uint64_t bit_count) {
+    while (bit_count) {
+        if ((0 == (dst_bit & 7)) && (bit_count >= 8)) {
+            uint64_t byte_count = bit_count >> 3;
+            memset(&dst[dst_bit >> 3], 0, byte_count);
+            dst_bit += byte_count << 3;
+            bit_count -= byte_count << 3;
+            continue;
+        }
+        dst[dst_bit >> 3] &= (uint8_t) ~(1 << (dst_bit & 7));
+        ++dst_bit;
+        --bit_count;
+    }
+}
+
 void jsdrv_bufsig_recv_data(struct bufsig_s * self, struct jsdrv_stream_signal_s * s) {
     self->hdr.sample_id = s->sample_id;
     self->hdr.field_id = s->field_id;
@@ -305,40 +348,26 @@ void jsdrv_bufsig_recv_data(struct bufsig_s * self, struct jsdrv_stream_signal_s
             clear(self, sample_id);
         } else {
             if (s->element_type == JSDRV_DATA_TYPE_FLOAT) {
-                if (s->element_size_bits == 32) {
-                    // fill float32 with NaN
-                    uint64_t idx = self->level0_head;
-                    float *f32 = (float *) self->level0_data;
-                    for (uint64_t i = 0; i < k; ++i) {
-                        if (idx >= self->N) {
-                            idx = idx % self->N;
-                        }
-                        f32[idx] = NAN;
-                        ++idx;
+                // fill float32 with NaN
+                uint64_t idx = self->level0_head;
+                float *f32 = (float *) self->level0_data;
+                for (uint64_t i = 0; i < k; ++i) {
+                    if (idx >= self->N) {
+                        idx = idx % self->N;
                     }
-                } else if (s->element_size_bits == 64) {
-                    // fill float64 with NaN
-                    uint64_t idx = self->level0_head;
-                    double *f64 = (double *) self->level0_data;
-                    for (uint64_t i = 0; i < k; ++i) {
-                        if (idx >= self->N) {
-                            idx = idx % self->N;
-                        }
-                        f64[idx] = NAN;
-                        ++idx;
-                    }
+                    f32[idx] = NAN;
+                    ++idx;
                 }
             } else {
                 // fill integer types with zeros
-                uint64_t size = (k * s->element_size_bits + 7) / 8;
-                uint64_t head = (self->level0_head * self->hdr.element_size_bits) / 8;
-                if ((self->level0_head + size) > self->N) {
-                    uint64_t size1 = (self->N * s->element_size_bits) / 8 - head;
-                    uint64_t size2 = size - size1;
-                    memset(&f_dst[head], 0, size1);
-                    memset(&f_dst[0], 0, size2);
+                uint64_t head = self->level0_head;
+                uint8_t bits = self->hdr.element_size_bits;
+                if ((head + k) > self->N) {
+                    uint64_t k1 = self->N - head;
+                    bits_zero(f_dst, head * bits, k1 * bits);
+                    bits_zero(f_dst, 0, (k - k1) * bits);
                 } else {
-                    memset(&f_dst[head], 0, size);
+                    bits_zero(f_dst, head * bits, k * bits);
                 }
             }
             uint64_t start_idx = self->level0_head;
@@ -363,6 +392,8 @@ void jsdrv_bufsig_recv_data(struct bufsig_s * self, struct jsdrv_stream_signal_s
 
     // JSDRV_LOGI("bufsig_recv_data: sample_id=%" PRIu64 " length=%" PRIu64, s->sample_id, length);
     self->sample_id_head = sample_id;
+    uint8_t bits = self->hdr.element_size_bits;
+    uint64_t src_bit = 0;
     while (length) {
         uint64_t head = self->level0_head;
         uint64_t k = length;
@@ -371,19 +402,30 @@ void jsdrv_bufsig_recv_data(struct bufsig_s * self, struct jsdrv_stream_signal_s
             k = self->N - head;
             head_next = 0;
         }
-        uint64_t copy_size = (k * self->hdr.element_size_bits + 7) / 8;
-        memcpy(&f_dst[(head * self->hdr.element_size_bits) / 8], f_src, copy_size);
+        if (0 == (bits & 7)) {
+            uint64_t copy_size = (k * bits) / 8;
+            memcpy(&f_dst[(head * bits) / 8], f_src, copy_size);
+            f_src += copy_size;
+        } else {
+            // sub-byte types: head may be at any bit offset
+            bits_copy(f_dst, head * bits, s->data, src_bit, k * bits);
+            src_bit += k * bits;
+        }
         self->level0_size += k;
         if (self->level0_size > self->N) {
             self->level0_size = self->N;
         }
-        f_src += copy_size;
         length -= k;
         self->level0_head = head_next;
         self->sample_id_head += k;
         sample_id += k;
         summarize(self, head, k);
     }
+
+    // The ring buffer overwrites the oldest samples; expire time map
+    // entries that only describe overwritten data so the tmap stays
+    // bounded over arbitrarily long captures.
+    jsdrv_tmap_expire_by_sample_id(self->tmap, self->sample_id_head - self->level0_size);
 }
 
 static uint64_t level0_tail(struct bufsig_s * self) {
